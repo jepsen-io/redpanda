@@ -47,10 +47,10 @@
   (c/su
     (let [id (node-id test node)]
       (rpk! :config :bootstrap
-              :--id     id
-              :--self   (cn/local-ip)
-              (when-not (zero? id)
-                :--ips (cn/ip (first (:nodes test))))))))
+            :--id     id
+            :--self   (cn/local-ip)
+            (when-not (zero? id)
+              [:--ips (cn/ip (first (:nodes test)))])))))
 
 (defn check-topic-creation
   "Checks that you can create a topic."
