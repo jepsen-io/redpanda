@@ -8,7 +8,8 @@
                     [util :as util :refer [pprint-str]]]
             [jepsen.tests.cycle.append :as append]
             [jepsen.redpanda [client :as rc]])
-  (:import (org.apache.kafka.clients.consumer ConsumerRecord)))
+  (:import (org.apache.kafka.clients.consumer ConsumerRecord)
+           (org.apache.kafka.common.errors InvalidTopicException)))
 
 (def partition-count
   "How many partitions per topic?"
@@ -46,23 +47,28 @@
 
     (case f
       :r
-      (do ; Start by assigning our consumer to this particular topic, seeking
-          ; the consumer to the beginning, then reading the entire topic.
-          (doto consumer
-            (.assign [topic-partition])
-            (.seekToBeginning [topic-partition]))
+      (try
+        ; Start by assigning our consumer to this particular topic, seeking
+        ; the consumer to the beginning, then reading the entire topic.
+        (doto consumer
+          (.assign [topic-partition])
+          (.seekToBeginning [topic-partition]))
 
-          ; How far do we have to read?
-          (let [end-offset (-> consumer
-                               (.endOffsets [topic-partition])
-                               (get topic-partition))
-                ; Read at least that far
-                records (rc/poll-up-to consumer end-offset)
-                ; Map records back into a list of integer elements
-                elements (mapv (fn record->element [^ConsumerRecord r]
-                                 (.value r))
-                               records)]
-            [f k elements]))
+        ; How far do we have to read?
+        (let [end-offset (-> consumer
+                             (.endOffsets [topic-partition])
+                             (get topic-partition))
+              ; Read at least that far
+              records (rc/poll-up-to consumer end-offset)
+              ; Map records back into a list of integer elements
+              elements (mapv (fn record->element [^ConsumerRecord r]
+                               (.value r))
+                             records)]
+          [f k elements])
+        (catch InvalidTopicException _
+          ; This can happen when a topic is created on one side of a partition
+          ; but another node doesn't know about it yet.
+          [f k nil]))
 
       :append
       (let [record (rc/producer-record topic (k->partition k) nil v)

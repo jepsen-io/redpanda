@@ -1,24 +1,75 @@
 (ns jepsen.redpanda.core
   "Entry point for command line runner. Constructs tests and runs them."
-  (:require [jepsen [checker :as checker]
+  (:require [clojure [string :as str]]
+            [jepsen [checker :as checker]
                     [cli :as cli]
                     [generator :as gen]
                     [tests :as tests]]
             [jepsen.os.debian :as debian]
-            [jepsen.redpanda [db :as db]]
+            [jepsen.redpanda [db :as db]
+                             [nemesis :as nemesis]]
             [jepsen.redpanda.workload [list-append :as list-append]]))
 
 (def workloads
   "A map of workload names to workload constructor functions."
   {:list-append list-append/workload})
 
+(def nemeses
+  "The types of faults our nemesis can produce"
+  #{:pause :kill :partition :clock})
+
+(def special-nemeses
+  "A map of special nemesis names to collections of faults"
+  {:none      []
+   :standard  [:pause :kill :partition :clock]
+   :all       [:pause :kill :partition :clock]})
+
+(def db-targets
+  "Valid targets for DB nemesis operations."
+  #{:one :primaries :minority-third :majority :all})
+
+(def partition-targets
+  "Valid targets for partition nemesis operations."
+  #{:one :primaries :minority-third :majority-ring})
+
+(def standard-nemeses
+  "A collection of partial options maps for various nemeses we want to run as a
+  part of test-all."
+  [{:nemesis nil}
+   {:nemesis #{:partition}}
+   {:nemesis #{:kill}}
+   {:nemesis #{:pause}}
+   {:nemesis #{:clock}}
+   {:nemesis #{:kill :partition :clock}}])
+
+(defn parse-comma-kws
+  "Takes a comma-separated string and returns a collection of keywords."
+  [spec]
+  (->> (str/split spec #",")
+       (remove #{""})
+       (map keyword)))
+
+(defn parse-nemesis-spec
+  "Takes a comma-separated nemesis string and returns a collection of keyword
+  faults."
+  [spec]
+  (->> (parse-comma-kws spec)
+       (mapcat #(get special-nemeses % [%]))
+       set))
+
 (def logging-overrides
   "New logging levels for various Kafka packages--otherwise this test is going
   to be NOISY"
   {
+   ; This is going to give us all kinds of NOT_CONTROLLER or
+   ; UNKNOWN_SERVER_ERROR messages during partitions
+   "org.apache.kafka.clients.NetworkClient"                          :error
    "org.apache.kafka.clients.admin.AdminClientConfig"                :warn
    "org.apache.kafka.clients.consumer.ConsumerConfig"                :warn
    "org.apache.kafka.clients.consumer.internals.ConsumerCoordinator" :warn
+   ; This is also going to kvetch about unknown topic/partitions when listing
+   ; offsets
+   "org.apache.kafka.clients.consumer.internals.Fetcher"             :error
    "org.apache.kafka.clients.consumer.internals.SubscriptionState"   :warn
    "org.apache.kafka.clients.consumer.KafkaConsumer"                 :warn
    "org.apache.kafka.clients.producer.KafkaProducer"                 :warn
@@ -34,22 +85,37 @@
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
   (let [workload-name (:workload opts)
-        workload      ((workloads workload-name) opts)]
+        workload      ((workloads workload-name) opts)
+        db            (db/db)
+        nemesis       (nemesis/package
+                        {:db        db
+                         :nodes     (:nodes opts)
+                         :faults    (:nemesis opts)
+                         :partition {:targets (:partition-targets opts)}
+                         :clock     {:targets (:db-targets opts)}
+                         :pause     {:targets (:db-targets opts)}
+                         :kill      {:targets (:db-targets opts)}
+                         :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
            {:name      (name workload-name)
-            :db        (db/db)
+            :db        db
             :os        debian/os
             :client    (:client workload)
-            :generator (->> (:generator workload)
-                            (gen/stagger    (/ (:rate opts)))
-                            (gen/time-limit (:time-limit opts))
-                            (gen/nemesis nil))
+            :nemesis   (:nemesis nemesis)
+            :generator (gen/phases
+                         (->> (:generator workload)
+                              (gen/stagger    (/ (:rate opts)))
+                              (gen/nemesis    (:generator nemesis))
+                              (gen/time-limit (:time-limit opts)))
+                         (gen/nemesis (:final-generator nemesis)))
             :checker   (checker/compose
                          {:stats      (checker/stats)
-                          :perf       (checker/perf)
+                          :perf       (checker/perf
+                                        {:nemeses (:perf nemesis)})
                           :ex         (checker/unhandled-exceptions)
                           :workload   (:checker workload)})
+            :perf-opts {:nemeses (:perf nemesis)}
             :logging {:overrides logging-overrides}})))
 
 (def validate-non-neg
@@ -57,7 +123,31 @@
 
 (def cli-opts
   "Command line options."
-  [[nil "--rate HZ" "Target number of ops/sec"
+  [
+   [nil "--db-targets TARGETS" "A comma-separated list of nodes to pause/kill/etc; e.g. one,all"
+    ;:default [:primaries :all]
+    :default [:one :all]
+    :parse-fn parse-comma-kws
+    :validate [(partial every? db-targets) (cli/one-of db-targets)]]
+
+    [nil "--nemesis FAULTS" "A comma-separated list of nemesis faults to enable"
+     :parse-fn parse-nemesis-spec
+     :validate [(partial every? (into nemeses (keys special-nemeses)))
+                (str "Faults must be one of " nemeses " or "
+                     (cli/one-of special-nemeses))]]
+
+    [nil "--nemesis-interval SECONDS" "How long to wait between nemesis faults."
+     :default  30
+     :parse-fn read-string
+     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
+
+    [nil "--partition-targets TARGETS" "A comma-separated list of nodes to target for network partitions; e.g. one,all"
+     ;:default [:primaries :majorities-ring]
+     :default [:one :majority :majorities-ring]
+     :parse-fn parse-comma-kws
+     :validate [(partial every? partition-targets) (cli/one-of partition-targets)]]
+
+   [nil "--rate HZ" "Target number of ops/sec"
     :default  40
     :parse-fn read-string
     :validate validate-non-neg]

@@ -17,7 +17,8 @@
                                               ProducerConfig
                                               ProducerRecord)
            (org.apache.kafka.common TopicPartition)
-           (org.apache.kafka.common.errors TopicExistsException)))
+           (org.apache.kafka.common.errors InvalidTopicException
+                                           TopicExistsException)))
 
 (def port
   "What port do we connect to?"
