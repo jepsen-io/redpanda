@@ -61,7 +61,8 @@
 (def logging-overrides
   "New logging levels for various Kafka packages--otherwise this test is going
   to be NOISY"
-  {
+  {; This complains about invalid topics during partitions, too
+   "org.apache.kafka.clients.Metadata"
    ; This is going to give us all kinds of NOT_CONTROLLER or
    ; UNKNOWN_SERVER_ERROR messages during partitions
    "org.apache.kafka.clients.NetworkClient"                          :error

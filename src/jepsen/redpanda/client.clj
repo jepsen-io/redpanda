@@ -72,8 +72,8 @@
   (cond-> {ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
            (str node ":" port)
 
-           ; ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
-           ; ???
+           ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
+           10000
 
            ProducerConfig/KEY_SERIALIZER_CLASS_CONFIG
            ;"org.apache.kafka.common.serialization.StringSerializer"
@@ -87,8 +87,10 @@
            ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
            1000
 
+           ; We choose this lower than DELIVERY_TIMEOUT_MS so that we have a
+           ; chance to retry
            ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG
-           10000
+           3000
 
            ; TODO?
            ; TRANSACTIONAL_ID_CONFIG
