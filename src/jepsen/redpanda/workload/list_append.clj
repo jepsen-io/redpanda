@@ -8,8 +8,10 @@
                     [util :as util :refer [pprint-str]]]
             [jepsen.tests.cycle.append :as append]
             [jepsen.redpanda [client :as rc]])
-  (:import (org.apache.kafka.clients.consumer ConsumerRecord)
-           (org.apache.kafka.common.errors InvalidTopicException)))
+  (:import (java.util.concurrent ExecutionException)
+           (org.apache.kafka.clients.consumer ConsumerRecord)
+           (org.apache.kafka.common.errors InvalidTopicException
+                                           TimeoutException)))
 
 (def partition-count
   "How many partitions per topic?"
@@ -83,16 +85,23 @@
   client/Client
   (open! [this test node]
     (assoc this
-           :admin     (rc/admin node)
-           :producer  (rc/producer node)
-           :consumer  (rc/consumer node)))
+           :admin     (rc/admin test node)
+           :producer  (rc/producer test node)
+           :consumer  (rc/consumer test node)))
 
   (setup! [this test])
 
   (invoke! [this test op]
-    (let [txn  (:value op)
-          txn' (mapv (partial mop! this) txn)]
-      (assoc op :type :ok, :value txn')))
+    (try
+      (let [txn  (:value op)
+            txn' (mapv (partial mop! this) txn)]
+        (assoc op :type :ok, :value txn'))
+      (catch ExecutionException e
+        (condp instance? (util/ex-root-cause e)
+          InvalidTopicException (assoc op :type :fail, :error :invalid-topic)
+          (throw e)))
+      (catch TimeoutException e
+        (assoc op :type :info, :error :timeout))))
 
   (teardown! [this test])
 

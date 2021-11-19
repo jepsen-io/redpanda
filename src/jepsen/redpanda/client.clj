@@ -67,36 +67,35 @@
 
 (defn producer-config
   "Constructs a config map for talking to a given node."
-  [node]
+  [test node]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/producer/ProducerConfig.html
-  {;ProducerConfig/ACKS_CONFIG
-   ; ???
+  (cond-> {ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
+           (str node ":" port)
 
-   ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
-   (str node ":" port)
+           ; ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
+           ; ???
 
-   ; ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
-   ; ???
+           ProducerConfig/KEY_SERIALIZER_CLASS_CONFIG
+           ;"org.apache.kafka.common.serialization.StringSerializer"
+           "org.apache.kafka.common.serialization.LongSerializer"
 
-   ProducerConfig/KEY_SERIALIZER_CLASS_CONFIG
-   ;"org.apache.kafka.common.serialization.StringSerializer"
-   "org.apache.kafka.common.serialization.LongSerializer"
+           ProducerConfig/VALUE_SERIALIZER_CLASS_CONFIG
+           ;"org.apache.kafka.common.serialization.StringSerializer"
+           "org.apache.kafka.common.serialization.LongSerializer"
 
-   ProducerConfig/VALUE_SERIALIZER_CLASS_CONFIG
-   ;"org.apache.kafka.common.serialization.StringSerializer"
-   "org.apache.kafka.common.serialization.LongSerializer"
+           ; We want rapid reconnects so we can observe broken-ness
+           ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
+           1000
 
-   ; We want rapid reconnects so we can observe broken-ness
-   ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
-   1000
+           ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG
+           10000
 
-   ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG
-   10000
+           ; TODO?
+           ; TRANSACTIONAL_ID_CONFIG
+           ; ???
+           }
+    (:acks test) (assoc ProducerConfig/ACKS_CONFIG (:acks test))))
 
-   ; TODO?
-   ; TRANSACTIONAL_ID_CONFIG
-   ; ???
-   })
 
 (defn admin-config
   "Constructs a config map for an admin client connected to the given node."
@@ -107,17 +106,17 @@
 
 (defn consumer
   "Opens a new consumer for the given node."
-  [node]
+  [test node]
   (KafkaConsumer. (->properties (consumer-config node))))
 
 (defn producer
   "Opens a new producer for a node."
-  [node]
-  (KafkaProducer. (->properties (producer-config node))))
+  [test node]
+  (KafkaProducer. (->properties (producer-config test node))))
 
 (defn admin
   "Opens an admin client for a node."
-  [node]
+  [test node]
   (Admin/create (->properties (admin-config node))))
 
 (defn close!

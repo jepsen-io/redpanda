@@ -73,7 +73,8 @@
    "org.apache.kafka.clients.consumer.internals.SubscriptionState"   :warn
    "org.apache.kafka.clients.consumer.KafkaConsumer"                 :warn
    "org.apache.kafka.clients.producer.KafkaProducer"                 :warn
-   "org.apache.kafka.clients.producer.ProducerConfig"                :warn
+   ; Comment this to see the config opts for producers
+   ;"org.apache.kafka.clients.producer.ProducerConfig"                :warn
    ; We're gonna get messages constantly about NOT_LEADER_OR_FOLLOWER whenever
    ; we create a topic
    "org.apache.kafka.clients.producer.internals.Sender"              :error
@@ -123,7 +124,9 @@
 
 (def cli-opts
   "Command line options."
-  [
+  [[nil "--acks ACKS" "What level of acknowledgement should our producers use? Default is unset (uses client default); try 1 or 'all'."
+    :default nil]
+
    [nil "--db-targets TARGETS" "A comma-separated list of nodes to pause/kill/etc; e.g. one,all"
     ;:default [:primaries :all]
     :default [:one :all]
