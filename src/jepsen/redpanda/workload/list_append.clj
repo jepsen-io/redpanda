@@ -5,6 +5,7 @@
   (:require [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+]]
             [jepsen [client :as client]
+                    [generator :as gen]
                     [util :as util :refer [pprint-str]]]
             [jepsen.tests.cycle.append :as append]
             [jepsen.redpanda [client :as rc]])
@@ -144,5 +145,16 @@
                           ; TODO: don't hardcode these
                           :max-txn-length 1
                           :consistency-models [:strict-serializable]))]
-    (assoc workload
-           :client (client))))
+    (-> workload
+        (assoc :client (client))
+        ; Rewrite generator ops to use :f :read or :f :write if they're read or
+        ; write-only. Elle doesn't care, but this helps us visualize read vs
+        ; write perf better.
+        (update :generator
+                (fn wrap-gen [gen]
+                  (gen/map (fn tag-rw [op]
+                             (case (->> op :value (map first) set)
+                               #{:r}      (assoc op :f :read)
+                               #{:append} (assoc op :f :write)
+                               op))
+                           gen))))))
