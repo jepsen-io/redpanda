@@ -4,7 +4,8 @@
             [jepsen [checker :as checker]
                     [cli :as cli]
                     [generator :as gen]
-                    [tests :as tests]]
+                    [tests :as tests]
+                    [util :as util]]
             [jepsen.os.debian :as debian]
             [jepsen.redpanda [db :as db]
                              [nemesis :as nemesis]]
@@ -133,6 +134,9 @@
     :parse-fn parse-comma-kws
     :validate [(partial every? db-targets) (cli/one-of db-targets)]]
 
+   [nil "--idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
+    :default nil]
+
     [nil "--nemesis FAULTS" "A comma-separated list of nemesis faults to enable"
      :parse-fn parse-nemesis-spec
      :validate [(partial every? (into nemeses (keys special-nemeses)))
@@ -154,6 +158,9 @@
     :default  40
     :parse-fn read-string
     :validate validate-non-neg]
+
+   [nil "--retries COUNT" "Producer retries. If omitted, uses client default."
+    :parse-fn util/parse-long]
 
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword

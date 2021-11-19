@@ -94,8 +94,14 @@
            ; TRANSACTIONAL_ID_CONFIG
            ; ???
            }
-    (:acks test) (assoc ProducerConfig/ACKS_CONFIG (:acks test))))
+    (not= nil (:acks test))
+    (assoc ProducerConfig/ACKS_CONFIG (:acks test))
 
+    (not= nil (:idempotence test))
+    (assoc ProducerConfig/ENABLE_IDEMPOTENCE_CONFIG (:idempotence test))
+
+    (not= nil (:retries test))
+    (assoc ProducerConfig/RETRIES_CONFIG (:retries test))))
 
 (defn admin-config
   "Constructs a config map for an admin client connected to the given node."
@@ -112,6 +118,7 @@
 (defn producer
   "Opens a new producer for a node."
   [test node]
+  ;(info :producer-props (pprint-str (producer-config test node)))
   (KafkaProducer. (->properties (producer-config test node))))
 
 (defn admin

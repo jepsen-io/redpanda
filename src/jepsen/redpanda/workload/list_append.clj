@@ -11,7 +11,10 @@
   (:import (java.util.concurrent ExecutionException)
            (org.apache.kafka.clients.consumer ConsumerRecord)
            (org.apache.kafka.common.errors InvalidTopicException
-                                           TimeoutException)))
+                                           NotLeaderOrFollowerException
+                                           TimeoutException
+                                           UnknownTopicOrPartitionException
+                                           )))
 
 (def partition-count
   "How many partitions per topic?"
@@ -98,7 +101,19 @@
         (assoc op :type :ok, :value txn'))
       (catch ExecutionException e
         (condp instance? (util/ex-root-cause e)
-          InvalidTopicException (assoc op :type :fail, :error :invalid-topic)
+          InvalidTopicException
+          (assoc op :type :fail, :error :invalid-topic)
+
+          NotLeaderOrFollowerException
+          (assoc op :type :fail, :error :not-leader-or-follower)
+
+          ; Love that we have to catch this in two different ways
+          TimeoutException
+          (assoc op :type :info, :error :timeout)
+
+          UnknownTopicOrPartitionException
+          (assoc op :type :fail, :error :unknown-topic-or-partition)
+
           (throw e)))
       (catch TimeoutException e
         (assoc op :type :info, :error :timeout))))
