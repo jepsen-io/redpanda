@@ -144,7 +144,7 @@
                      (cli/one-of special-nemeses))]]
 
     [nil "--nemesis-interval SECONDS" "How long to wait between nemesis faults."
-     :default  30
+     :default  15
      :parse-fn read-string
      :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
