@@ -24,6 +24,15 @@
   "What port do we connect to?"
   9092)
 
+(def next-transactional-id
+  "We automatically assign each producer a unique transactional ID"
+  (atom -1))
+
+(defn new-transactional-id
+  "Returns a unique transactional ID (mutating the global counter)"
+  []
+  (str "jt-" (swap! next-transactional-id inc)))
+
 (defn ^Properties ->properties
   "Turns a map into a Properties object."
   [m]
@@ -34,36 +43,36 @@
   "Constructs a properties map for talking to a given Kafka node."
   [node]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/consumer/ConsumerConfig.html
-  {ConsumerConfig/GROUP_ID_CONFIG
-   "clojure_example_group"
+  (cond->
+    {ConsumerConfig/GROUP_ID_CONFIG
+     "jepsen_group"
 
-   ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
-   ;"org.apache.kafka.common.serialization.StringDeserializer"
-   "org.apache.kafka.common.serialization.LongDeserializer"
+     ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
+     ;"org.apache.kafka.common.serialization.StringDeserializer"
+     "org.apache.kafka.common.serialization.LongDeserializer"
 
-   ConsumerConfig/VALUE_DESERIALIZER_CLASS_CONFIG
-   ;"org.apache.kafka.common.serialization.StringDeserializer"
-   "org.apache.kafka.common.serialization.LongDeserializer"
+     ConsumerConfig/VALUE_DESERIALIZER_CLASS_CONFIG
+     ;"org.apache.kafka.common.serialization.StringDeserializer"
+     "org.apache.kafka.common.serialization.LongDeserializer"
 
-   ConsumerConfig/BOOTSTRAP_SERVERS_CONFIG
-   (str node ":" port)
+     ConsumerConfig/BOOTSTRAP_SERVERS_CONFIG
+     (str node ":" port)
 
-   ; Maybe mess with these later?
-   ; ConsumerConfig/REQUEST_TIMEOUT_MS_CONFIG
-   ; 10000
+     ; Maybe mess with these later?
+     ; ConsumerConfig/REQUEST_TIMEOUT_MS_CONFIG
+     ; 10000
 
-   ; ConsumerConfig/DEFAULT_API_TIMEOUT_MS_CONFIG
-   ; 10000
+     ; ConsumerConfig/DEFAULT_API_TIMEOUT_MS_CONFIG
+     ; 10000
 
-   ; ConsumerConfig/ISOLATION_LEVEL_CONFIG
-   ; ???
+     ; ConsumerConfig/ISOLATION_LEVEL_DOC
+     ; ???
 
-   ; ConsumerConfig/ISOLATION_LEVEL_DOC
-   ; ???
-
-   ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
-   ; ???
-   })
+     ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
+     ; ???
+     }
+    (not= nil (:isolation-level test))
+    (assoc ConsumerConfig/ISOLATION_LEVEL_CONFIG (:isolation-level test))))
 
 (defn producer-config
   "Constructs a config map for talking to a given node."
@@ -93,7 +102,6 @@
            3000
 
            ; TODO?
-           ; TRANSACTIONAL_ID_CONFIG
            ; ???
            }
     (not= nil (:acks test))
@@ -103,7 +111,10 @@
     (assoc ProducerConfig/ENABLE_IDEMPOTENCE_CONFIG (:idempotence test))
 
     (not= nil (:retries test))
-    (assoc ProducerConfig/RETRIES_CONFIG (:retries test))))
+    (assoc ProducerConfig/RETRIES_CONFIG (:retries test))
+
+    (not= nil (:transactional-id test))
+    (assoc ProducerConfig/TRANSACTIONAL_ID_CONFIG (:transactional-id test))))
 
 (defn admin-config
   "Constructs a config map for an admin client connected to the given node."
