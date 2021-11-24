@@ -176,6 +176,12 @@
    [nil "--retries COUNT" "Producer retries. If omitted, uses client default."
     :parse-fn util/parse-long]
 
+   [nil "--sub-via STRATEGIES" "A comma-separated list like `assign,subscribe`, which denotes how we ask clients to assign topics to themselves."
+    :default #{:assign :subscribe}
+    :parse-fn (comp set parse-comma-kws)
+    :validate [#(every? #{:assign :subscribe} %)
+               "Can only be assign and/or subscribe"]]
+
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword
     :default  :list-append

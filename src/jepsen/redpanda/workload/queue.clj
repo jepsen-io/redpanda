@@ -3,10 +3,16 @@
   producer and consumer. To subscribe to a new set of topics, we issue an
   operation like:
 
-    {:f :subscribe, :value [topic1, topic2, ...]}
+    {:f :subscribe, :value [k1, k2, ...]}
 
-  Just like the Kafka client API, this replaces the current topics subscribed
-  to.
+  or
+
+    {:f :assign, :value [k1, k2, ...]}
+
+  ... where k1, k2, etc denote specific topics and partitions. For subscribe,
+  we just use that key's topic, and allow Redpanda to control which partitions
+  we get. Just like the Kafka client API, both subscribe and assign replace the
+  current topics for the consumer.
 
   Reads and writes (and mixes thereof) are encoded as a vector of
   micro-operations:
@@ -252,6 +258,9 @@
                           (rc/subscribe! consumer))
                      (assoc op :type :ok))
 
+      :assign (do (.assign consumer (map k->topic-partition (:value op)))
+                  (assoc op :type :ok))
+
       (:poll, :send, :txn)
       (let [; How should we interpret the operation completion :type when a
             ; single micro-op definitely fails?
@@ -337,9 +346,10 @@
         (let [this' (InterleaveSubscribes. gen')
               op'   (dissoc op :keys)]
           (if (< (rand) subscribe-ratio)
-            ; At random, emit a subscribe op instead.
-            [(gen/fill-in-op {:f :subscribe, :value (vec (:keys op))} context)
-             this]
+            ; At random, emit a subscribe/assign op instead.
+            (let [f  (rand-nth (vec (:sub-via test)))
+                  op {:f f, :value (vec (:keys op))}]
+              [(gen/fill-in-op op context) this])
             ; Or pass through the op directly
             [op' (InterleaveSubscribes. gen')])))))
 
@@ -349,7 +359,8 @@
 
 (defn interleave-subscribes
   "Takes a txn generator and keeps track of the keys flowing through it,
-  interspersing occasional :subscribe operations for recently seen keys."
+  interspersing occasional :subscribe or :assign operations for recently seen
+  keys."
   [txn-gen]
   (InterleaveSubscribes. txn-gen))
 
@@ -452,11 +463,10 @@
          ; Infos... right now nothing but we MIGHT be able to get partial info
          ; later, so we'll process them anyway.
          (case (:f op)
-           :subscribe (recur history' logs)
-
-           (:poll :send :txn) (recur history' (reduce version-orders-reduce-mop
-                                                      logs
-                                                      (:value op))))))
+           (:poll, :send, :txn)
+           (recur history' (reduce version-orders-reduce-mop logs (:value op)))
+           ; Some non-transactional op, like an assign/subscribe
+           (recur history' logs))))
      ; All done; transform our logs to orders.
      {:errors (->> logs
                    (mapcat (fn errors [[k log]]
@@ -503,20 +513,32 @@
           (:value op)))
 
 (defn reads-of-key
-  "Returns a seq of all operations which read the given key."
-  [k history]
-  (->> history
-       (filter (comp #{:txn :send :poll} :f))
-       (filter (fn [op]
-                 (contains? (op-reads op) k)))))
+  "Returns a seq of all operations which read the given key, and, optionally,
+  read the given value."
+  ([k history]
+   (->> history
+        (filter (comp #{:txn :send :poll} :f))
+        (filter (fn [op]
+                  (contains? (op-reads op) k)))))
+  ([k v history]
+   (->> history
+        (reads-of-key k)
+        (filter (fn [op]
+                  (some #{v} (get (op-reads op) k)))))))
 
 (defn writes-of-key
-  "Returns a seq of all operations which wrote the given key."
-  [k history]
-  (->> history
-       (filter (comp #{:txn :send :poll} :f))
-       (filter (fn [op]
-                 (contains? (op-writes op) k)))))
+  "Returns a seq of all operations which wrote the given key, and, optionally,
+  sent the given value."
+  ([k history]
+   (->> history
+        (filter (comp #{:txn :send :poll} :f))
+        (filter (fn [op]
+                  (contains? (op-writes op) k)))))
+  ([k v history]
+   (->> history
+        (writes-of-key k)
+        (filter (fn [op]
+                  (some #{v} (get (op-writes op) k)))))))
 
 (defn writes-by-type
   "Takes a history and constructs a map of types (:ok, :info, :fail) to maps of
@@ -592,7 +614,7 @@
        (keep (fn [[k vs]]
               ; Great, now for this key, find the highest index observed
               (let [vo         (get version-orders k)
-                    _ (info :k k :vs vs :vo vo)
+                    ;_ (info :k k :vs vs :vo vo)
                     last-index (->> vs
                                     ; We might observe a value but *not* know
                                     ; its offset from either write or read.
