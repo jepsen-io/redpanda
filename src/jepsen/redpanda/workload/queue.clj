@@ -198,10 +198,10 @@
                      (into (sorted-map))
                      (vector :poll))))
               (catch InvalidTopicException _
-                [:poll []])
+                [:poll {}])
               (catch IllegalStateException e
                 (if (re-find #"not subscribed to any" (.getMessage e))
-                  [:poll []]
+                  [:poll {}]
                   (throw e))))
 
     :send (let [[f k v]   mop

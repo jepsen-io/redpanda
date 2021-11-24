@@ -92,11 +92,9 @@
   "Constructs a config map for talking to a given node."
   [node opts]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/producer/ProducerConfig.html
+  ; See https://docs.confluent.io/platform/current/installation/configuration/producer-configs.html
   (cond-> {ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
            (str node ":" port)
-
-           ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
-           10000
 
            ProducerConfig/KEY_SERIALIZER_CLASS_CONFIG
            ;"org.apache.kafka.common.serialization.StringSerializer"
@@ -106,14 +104,31 @@
            ;"org.apache.kafka.common.serialization.StringSerializer"
            "org.apache.kafka.common.serialization.LongSerializer"
 
-           ; We want rapid reconnects so we can observe broken-ness
-           ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
-           1000
+           ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
+           10000
 
            ; We choose this lower than DELIVERY_TIMEOUT_MS so that we have a
            ; chance to retry
            ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG
            3000
+
+           ProducerConfig/MAX_BLOCK_MS_CONFIG
+           10000
+
+           ; Client complains `The configuration 'transaction.timeout.ms' was
+           ; supplied but isn't a known config`; not sure what's up with that
+           ; ProducerConfig/TRANSACTION_TIMEOUT_CONFIG
+           ; 10000
+
+           ; We want rapid reconnects so we can observe broken-ness
+           ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
+           1000
+
+           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+           500
+
+           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+           1000
 
            ; TODO?
            ; ???
