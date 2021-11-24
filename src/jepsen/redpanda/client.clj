@@ -41,17 +41,21 @@
   (doto (Properties.)
     (.putAll (map-vals str m))))
 
+(def consumer-config-logged?
+  "Used to ensure that we only log consumer configs once."
+  (atom false))
+
+(def producer-config-logged?
+  "Used to ensure that we only log producer configs once."
+  (atom false))
+
 (defn consumer-config
   "Constructs a properties map for talking to a given Kafka node."
-  [node]
+  [node opts]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/consumer/ConsumerConfig.html
   (cond->
     {ConsumerConfig/GROUP_ID_CONFIG
      "jepsen_group"
-
-     ; We're going to handle commits ourselves
-     ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG
-     false
 
      ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
      "org.apache.kafka.common.serialization.LongDeserializer"
@@ -75,12 +79,18 @@
      ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
      ; ???
      }
-    (not= nil (:isolation-level test))
-    (assoc ConsumerConfig/ISOLATION_LEVEL_CONFIG (:isolation-level test))))
+    (not= nil (:isolation-level opts))
+    (assoc ConsumerConfig/ISOLATION_LEVEL_CONFIG (:isolation-level opts))
+
+    (not= nil (:auto-offset-reset opts))
+    (assoc ConsumerConfig/AUTO_OFFSET_RESET_CONFIG (:auto-offset-reset opts))
+
+    (not= nil (:enable-auto-commit opts))
+    (assoc ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG (:enable-auto-commit opts))))
 
 (defn producer-config
   "Constructs a config map for talking to a given node."
-  [opts node]
+  [node opts]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/producer/ProducerConfig.html
   (cond-> {ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
            (str node ":" port)
@@ -130,16 +140,21 @@
 (defn consumer
   "Opens a new consumer for the given node."
   [opts node]
-  (KafkaConsumer. (->properties (consumer-config node))))
+  (let [config (consumer-config node opts)]
+    (when (compare-and-set! consumer-config-logged? false true)
+      (info "Consumer config:\n" (pprint-str config)))
+    (KafkaConsumer. (->properties config))))
 
 (defn producer
   "Opens a new producer for a node."
   [opts node]
-  ;(info :producer-props (pprint-str (producer-config test node)))
-  (let [p (KafkaProducer. (->properties (producer-config opts node)))]
-    (when (:transactional-id opts)
-      (.initTransactions p))
-    p))
+  (let [config (producer-config node opts)]
+    (when (compare-and-set! producer-config-logged? false true)
+      (info "Producer config:\n" (pprint-str config)))
+    (let [p (KafkaProducer. (->properties config))]
+      (when (:transactional-id opts)
+        (.initTransactions p))
+      p)))
 
 (defn admin
   "Opens an admin client for a node."

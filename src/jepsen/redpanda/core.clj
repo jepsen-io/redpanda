@@ -1,6 +1,7 @@
 (ns jepsen.redpanda.core
   "Entry point for command line runner. Constructs tests and runs them."
   (:require [clojure [string :as str]]
+            [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
                     [cli :as cli]
                     [generator :as gen]
@@ -78,7 +79,7 @@
    "org.apache.kafka.clients.consumer.KafkaConsumer"                 :warn
    "org.apache.kafka.clients.producer.KafkaProducer"                 :warn
    ; Comment this to see the config opts for producers
-   ;"org.apache.kafka.clients.producer.ProducerConfig"                :warn
+   "org.apache.kafka.clients.producer.ProducerConfig"                :warn
    ; We're gonna get messages constantly about NOT_LEADER_OR_FOLLOWER whenever
    ; we create a topic
    "org.apache.kafka.clients.producer.internals.Sender"              :error
@@ -131,11 +132,21 @@
   [[nil "--acks ACKS" "What level of acknowledgement should our producers use? Default is unset (uses client default); try 1 or 'all'."
     :default nil]
 
+   [nil "--auto-offset-reset BEHAVIOR" "How should consumers handle it when there's no initial offset in Kafka?"
+   :default nil]
+
    [nil "--db-targets TARGETS" "A comma-separated list of nodes to pause/kill/etc; e.g. one,all"
     ;:default [:primaries :all]
     :default [:one :all]
     :parse-fn parse-comma-kws
     :validate [(partial every? db-targets) (cli/one-of db-targets)]]
+
+   [nil "--enable-auto-commit" "If set, disables automatic commits via Kafka consumers. If not provided, uses the client default."
+    :default  nil
+    :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit true))]
+
+   [nil "--disable-auto-commit" "If set, enables automatic commits via Kafka consumers. If not provided, uses the client default."
+    :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit false))]
 
    [nil "--idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
     :default nil]

@@ -253,30 +253,46 @@
                      (assoc op :type :ok))
 
       (:poll, :send, :txn)
-      (try
-        (rc/unwrap-errors
-          ;(.beginTransaction producer)
-          (let [txn  (:value op)
-                txn' (mapv (partial mop! this) txn)]
-            ; TODO: enable txns, write some kind of macro for commit/abort.
-            ;(.commitTransaction producer)
-            ;(.abortTransaction producer)
-            (assoc op :type :ok, :value txn')))
-        (catch InvalidTopicException _
-          (assoc op :type :fail, :error :invalid-topic))
+      (let [; How should we interpret the operation completion :type when a
+            ; single micro-op definitely fails?
+            mop-fail-type (if (= 1 (count (:value op)))
+                            ; If we only tried a single mop, we can just fail
+                            ; the whole op.
+                            :fail
+                            ; TODO: when we do transactions, the failure of any
+                            ; single mop can be safely interpreted as a :fail
+                            ; of the entire op, since all mops should fail to
+                            ; commit as a unit. Without txns, these should be
+                            ; info, because earlier writes may have committed.
+                            :info)]
+        (try
+          (rc/unwrap-errors
+            ;(.beginTransaction producer)
+            (let [txn  (:value op)
+                  txn' (mapv (partial mop! this) txn)]
+              ; If we read, commit offsets.
+              (when (#{:poll :txn} (:f op))
+                (.commitSync consumer))
 
-        (catch NotLeaderOrFollowerException _
-          (assoc op :type :fail, :error :not-leader-or-follower))
+              ; TODO: enable txns, write some kind of macro for commit/abort.
+              ;(.commitTransaction producer)
+              ;(.abortTransaction producer)
+              (assoc op :type :ok, :value txn')))
+          (catch InvalidTopicException _
+            (assoc op :type mop-fail-type, :error :invalid-topic))
 
-        (catch UnknownTopicOrPartitionException _
-          (assoc op :type :fail, :error :unknown-topic-or-partition))
+          (catch NotLeaderOrFollowerException _
+            (assoc op :type mop-fail-type, :error :not-leader-or-follower))
 
-        (catch UnknownServerException e
-          (assoc op :type :fail, :error [:unknown-server-exception
-                                         (.getMessage e)]))
+          (catch UnknownTopicOrPartitionException _
+            (assoc op :type mop-fail-type, :error :unknown-topic-or-partition))
 
-        (catch TimeoutException _
-          (assoc op :type :info, :error :timeout)))))
+          (catch UnknownServerException e
+            (assoc op :type :info, :error [:unknown-server-exception
+                                           (.getMessage e)]))
+
+          (catch TimeoutException _
+            (assoc op :type :info, :error :timeout))))))
 
   (teardown! [this test])
 
@@ -576,8 +592,14 @@
        (keep (fn [[k vs]]
               ; Great, now for this key, find the highest index observed
               (let [vo         (get version-orders k)
+                    _ (info :k k :vs vs :vo vo)
                     last-index (->> vs
-                                    (map (:by-value vo))
+                                    ; We might observe a value but *not* know
+                                    ; its offset from either write or read.
+                                    ; When this happens, we can't say anything
+                                    ; about how much of the partition should
+                                    ; have been observed, so we skip it.
+                                    (keep (:by-value vo))
                                     (reduce max -1))
                     ; Now take a prefix of the version order up to that index;
                     ; these are the values we should have observed.
