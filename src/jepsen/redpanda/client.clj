@@ -6,6 +6,7 @@
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (java.time Duration)
            (java.util Properties)
+           (java.util.concurrent ExecutionException)
            (org.apache.kafka.clients.admin Admin
                                            AdminClientConfig
                                            NewTopic)
@@ -16,7 +17,8 @@
            (org.apache.kafka.clients.producer KafkaProducer
                                               ProducerConfig
                                               ProducerRecord)
-           (org.apache.kafka.common TopicPartition)
+           (org.apache.kafka.common KafkaException
+                                    TopicPartition)
            (org.apache.kafka.common.errors InvalidTopicException
                                            TopicExistsException)))
 
@@ -31,7 +33,7 @@
 (defn new-transactional-id
   "Returns a unique transactional ID (mutating the global counter)"
   []
-  (str "jt-" (swap! next-transactional-id inc)))
+  (str "jt" (swap! next-transactional-id inc)))
 
 (defn ^Properties ->properties
   "Turns a map into a Properties object."
@@ -47,12 +49,14 @@
     {ConsumerConfig/GROUP_ID_CONFIG
      "jepsen_group"
 
+     ; We're going to handle commits ourselves
+     ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG
+     false
+
      ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
-     ;"org.apache.kafka.common.serialization.StringDeserializer"
      "org.apache.kafka.common.serialization.LongDeserializer"
 
      ConsumerConfig/VALUE_DESERIALIZER_CLASS_CONFIG
-     ;"org.apache.kafka.common.serialization.StringDeserializer"
      "org.apache.kafka.common.serialization.LongDeserializer"
 
      ConsumerConfig/BOOTSTRAP_SERVERS_CONFIG
@@ -76,7 +80,7 @@
 
 (defn producer-config
   "Constructs a config map for talking to a given node."
-  [test node]
+  [opts node]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/producer/ProducerConfig.html
   (cond-> {ProducerConfig/BOOTSTRAP_SERVERS_CONFIG
            (str node ":" port)
@@ -104,17 +108,17 @@
            ; TODO?
            ; ???
            }
-    (not= nil (:acks test))
-    (assoc ProducerConfig/ACKS_CONFIG (:acks test))
+    (not= nil (:acks opts))
+    (assoc ProducerConfig/ACKS_CONFIG (:acks opts))
 
-    (not= nil (:idempotence test))
-    (assoc ProducerConfig/ENABLE_IDEMPOTENCE_CONFIG (:idempotence test))
+    (not= nil (:idempotence opts))
+    (assoc ProducerConfig/ENABLE_IDEMPOTENCE_CONFIG (:idempotence opts))
 
-    (not= nil (:retries test))
-    (assoc ProducerConfig/RETRIES_CONFIG (:retries test))
+    (not= nil (:retries opts))
+    (assoc ProducerConfig/RETRIES_CONFIG (:retries opts))
 
-    (not= nil (:transactional-id test))
-    (assoc ProducerConfig/TRANSACTIONAL_ID_CONFIG (:transactional-id test))))
+    (not= nil (:transactional-id opts))
+    (assoc ProducerConfig/TRANSACTIONAL_ID_CONFIG (:transactional-id opts))))
 
 (defn admin-config
   "Constructs a config map for an admin client connected to the given node."
@@ -125,14 +129,17 @@
 
 (defn consumer
   "Opens a new consumer for the given node."
-  [test node]
+  [opts node]
   (KafkaConsumer. (->properties (consumer-config node))))
 
 (defn producer
   "Opens a new producer for a node."
-  [test node]
+  [opts node]
   ;(info :producer-props (pprint-str (producer-config test node)))
-  (KafkaProducer. (->properties (producer-config test node))))
+  (let [p (KafkaProducer. (->properties (producer-config opts node)))]
+    (when (:transactional-id opts)
+      (.initTransactions p))
+    p))
 
 (defn admin
   "Opens an admin client for a node."
@@ -174,6 +181,11 @@
   [ms]
   (Duration/ofMillis ms))
 
+(defn subscribe!
+  "Subscribes to the given set of topics."
+  [^KafkaConsumer consumer, topics]
+  (.subscribe consumer topics))
+
 (defn poll-up-to
   "Takes a consumer, and polls it (with duration 0) for records up to and
   including (dec offset), and (quite possibly) higher. Returns a lazy sequence
@@ -214,3 +226,15 @@
              true
              (concat records
                      (lazy-seq (poll-up-to consumer offset duration))))))))
+
+(defmacro unwrap-errors
+  "Depending on whether you're doing a future get or a sync call, Kafka might
+  throw its exceptions wrapped in a j.u.c.ExecutionException. This macro
+  transparently unwraps those."
+  [& body]
+  `(try ~@body
+        (catch ExecutionException e#
+          (let [cause# (util/ex-root-cause e#)]
+            (if (instance? KafkaException cause#)
+              (throw cause#)
+              (throw e#))))))

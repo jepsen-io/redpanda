@@ -9,11 +9,13 @@
             [jepsen.os.debian :as debian]
             [jepsen.redpanda [db :as db]
                              [nemesis :as nemesis]]
-            [jepsen.redpanda.workload [list-append :as list-append]]))
+            [jepsen.redpanda.workload [list-append :as list-append]
+                                      [queue :as queue]]))
 
 (def workloads
   "A map of workload names to workload constructor functions."
-  {:list-append list-append/workload})
+  {:list-append list-append/workload
+   :queue       queue/workload})
 
 (def nemeses
   "The types of faults our nemesis can produce"

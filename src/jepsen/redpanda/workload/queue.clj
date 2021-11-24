@@ -1,20 +1,21 @@
 (ns jepsen.redpanda.workload.queue
-  "A workload which treats Kafka more as a queue. Each client maintains a
+  "A workload which treats Redpanda more as a queue. Each client maintains a
   producer and consumer. To subscribe to a new set of topics, we issue an
   operation like:
 
     {:f :subscribe, :value [topic1, topic2, ...]}
 
-  Just like the Kafka API, this replaces the topic listing entirely.
+  Just like the Kafka client API, this replaces the current topics subscribed
+  to.
 
   Reads and writes (and mixes thereof) are encoded as a vector of
   micro-operations:
 
-    {:f :read,  :value [op1, op2, ...]}
-    {:f :write, :value [op1, op2, ...]}
-    {:f :txn,   :value [op1, op2, ...]}
+    {:f :poll, :value [op1, op2, ...]}
+    {:f :send, :value [op1, op2, ...]}
+    {:f :txn,  :value [op1, op2, ...]}
 
-  Where :read and :write denote transactions comprising only reads or writes,
+  Where :poll and :send denote transactions comprising only reads or writes,
   respectively, and :txn indicates a general-purpose transaction. Operations
   are of two forms:
 
@@ -112,23 +113,29 @@
   polls k and observes any of v1, v2, or v3, but not *all* of them. This
   miiight be captured as a wr-rw cycle in some cases, but perhaps not all,
   since we're only generating rw edges for final reads."
-  (:require [clojure.tools.logging :refer [info warn]]
+  (:require [clojure [set :as set]]
+            [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+]]
-            [jepsen [client :as client]
+            [jepsen [checker :as checker]
+                    [client :as client]
                     [generator :as gen]
-                    [util :as util :refer [pprint-str]]]
+                    [util :as util :refer [map-vals parse-long pprint-str]]]
             [jepsen.tests.cycle.append :as append]
             [jepsen.redpanda [client :as rc]])
   (:import (java.util.concurrent ExecutionException)
-           (org.apache.kafka.clients.consumer ConsumerRecord)
+           (org.apache.kafka.clients.admin Admin)
+           (org.apache.kafka.clients.consumer ConsumerRecords
+                                              ConsumerRecord
+                                              KafkaConsumer)
+           (org.apache.kafka.clients.producer KafkaProducer
+                                              RecordMetadata)
+           (org.apache.kafka.common TopicPartition)
            (org.apache.kafka.common.errors InvalidTopicException
                                            NotLeaderOrFollowerException
                                            TimeoutException
                                            UnknownTopicOrPartitionException
+                                           UnknownServerException
                                            )))
-
-; Just wrote the documentation here; the code is a WIP, bears no relation to
-; the actual plan, and will likely be mostly rewritten.
 
 (def partition-count
   "How many partitions per topic?"
@@ -149,6 +156,14 @@
   [k]
   (rc/topic-partition (k->topic k) (k->partition k)))
 
+(defn topic-partition->k
+  "Turns a TopicPartition into a key."
+  ([^TopicPartition tp]
+   (topic-partition->k (.topic tp) (.partition tp)))
+  ([topic partition]
+   (+ (* partition-count (parse-long (nth (re-find #"t(\d+)" topic) 1)))
+      partition)))
+
 (def replication-factor
   "What replication factor should we use for each topic?"
   3)
@@ -156,92 +171,112 @@
 (defn mop!
   "Applies a micro-operation from a transaction: either a :r read or a :append
   operation."
-  [{:keys [extant-topics consumed admin producer consumer] :as client}
-   [f k v :as mop]]
-  (let [topic           (k->topic k)
-        topic-partition (k->topic-partition k)]
-    (case f
-      :r
-      (try
-        ; Start by assigning our consumer to this particular topic, seeking
-        ; the consumer to the beginning, then reading the entire topic.
-        (doto consumer
-          (.assign [topic-partition])
-          (.seekToBeginning [topic-partition]))
+  [{:keys [extant-topics
+           ^Admin admin
+           ^KafkaProducer producer
+           ^KafkaConsumer consumer] :as client}
+   mop]
+  (case (first mop)
+    :poll (try
+            (rc/unwrap-errors
+              (let [records (.poll consumer (rc/ms->duration 10))]
+                (->> (.partitions records)
+                     (map (fn per-topic-partition [topic-partition]
+                            ; Return a key, messages pair
+                            [(topic-partition->k topic-partition)
+                             ; Turn each message into an offset, record] pair
+                             (mapv (fn xform-messages [^ConsumerRecord record]
+                                     [(.offset record)
+                                      (.value record)])
+                                   (.records records topic-partition))]))
+                     (into (sorted-map))
+                     (vector :poll))))
+              (catch InvalidTopicException _
+                [:poll []])
+              (catch IllegalStateException e
+                (if (re-find #"not subscribed to any" (.getMessage e))
+                  [:poll []]
+                  (throw e))))
 
-        ; How far do we have to read?
-        (let [end-offset (-> consumer
-                             (.endOffsets [topic-partition])
-                             (get topic-partition))
-              ; Read at least that far
-              records (rc/poll-up-to consumer end-offset)
-              ; Map records back into a list of integer elements
-              elements (mapv (fn record->element [^ConsumerRecord r]
-                               (.value r))
-                             records)]
-          [f k elements])
-        (catch InvalidTopicException _
-          ; This can happen when a topic is created on one side of a partition
-          ; but another node doesn't know about it yet.
-          [f k nil]))
-
-      :append
-      (do ; Create topic if it doesn't exist.
-          (when-not (contains? @extant-topics topic)
-            (rc/create-topic! admin topic partition-count replication-factor)
-            (swap! extant-topics conj topic)))
-
-      (let [record (rc/producer-record topic (k->partition k) nil v)
-            res    @(.send producer record)]
-        mop))))
+    :send (let [[f k v]   mop
+                topic     (k->topic k)
+                ; Create topic if it doesn't exist yet
+                _         (when-not (contains? @extant-topics topic)
+                            (rc/create-topic! admin topic partition-count
+                                              replication-factor)
+                            (swap! extant-topics conj topic))
+                ; Send message to Redpanda
+                partition (k->partition k)
+                record (rc/producer-record topic (k->partition k) nil v)
+                res    ^RecordMetadata @(.send producer record)
+                k'     (topic-partition->k (.topic res)
+                                           (.partition res))
+                offset (when (.hasOffset res)
+                         (.offset res))]
+            (assert+ (= k k')
+                     {:type ::key-mismatch
+                      :k  k
+                      :k' k'})
+            ; As it turns out offsets go missing fairly often
+            (when-not offset
+              (info "Missing offset for send() acknowledgement of key" k "value" v))
+            ;(assert+ offset
+            ;         {:type ::missing-offset
+            ;          :res  res})
+            ; And record offset and value.
+            [f k' [offset v]])))
 
 (defrecord Client [; Our three Kafka clients
-                   admin producer consumer
-                   ; A collection of topics we're subscribed to.
-                   subscriptions
+                   ^Admin admin
+                   ^KafkaProducer producer
+                   ^KafkaConsumer consumer
                    ; An atom with a set of topics we've created. We have to
                    ; create topics before they can be used.
-                   extant-topics
-                   ; An atom of a map of keys to vectors of elements: the last
-                   ; observed values for each key. When performing a read of a
-                   ; key, we append any consumed elements onto the
-                   ; corresponding vector here to determine the full read,
-                   ; allowing us to transform a simple produce/consume workload
-                   ; into a list-append history.
-                   consumed]
+                   extant-topics]
   client/Client
   (open! [this test node]
     (let [tx-id (rc/new-transactional-id)]
       (assoc this
              :admin     (rc/admin test node)
-             :producer  (rc/producer (assoc test :transactional-id tx-id))
+;             :producer  (rc/producer (assoc test :transactional-id tx-id) node)
+             :producer  (rc/producer test node)
              :consumer  (rc/consumer test node))))
 
   (setup! [this test])
 
   (invoke! [this test op]
-    (try
-      (let [txn  (:value op)
-            txn' (mapv (partial mop! this) txn)]
-        (assoc op :type :ok, :value txn'))
-      (catch ExecutionException e
-        (condp instance? (util/ex-root-cause e)
-          InvalidTopicException
-          (assoc op :type :fail, :error :invalid-topic)
+    (case (:f op)
+      :subscribe (do (->> (:value op)
+                          (map k->topic)
+                          distinct
+                          (rc/subscribe! consumer))
+                     (assoc op :type :ok))
 
-          NotLeaderOrFollowerException
-          (assoc op :type :fail, :error :not-leader-or-follower)
+      (:poll, :send, :txn)
+      (try
+        (rc/unwrap-errors
+          ;(.beginTransaction producer)
+          (let [txn  (:value op)
+                txn' (mapv (partial mop! this) txn)]
+            ; TODO: enable txns, write some kind of macro for commit/abort.
+            ;(.commitTransaction producer)
+            ;(.abortTransaction producer)
+            (assoc op :type :ok, :value txn')))
+        (catch InvalidTopicException _
+          (assoc op :type :fail, :error :invalid-topic))
 
-          ; Love that we have to catch this in two different ways
-          TimeoutException
-          (assoc op :type :info, :error :timeout)
+        (catch NotLeaderOrFollowerException _
+          (assoc op :type :fail, :error :not-leader-or-follower))
 
-          UnknownTopicOrPartitionException
-          (assoc op :type :fail, :error :unknown-topic-or-partition)
+        (catch UnknownTopicOrPartitionException _
+          (assoc op :type :fail, :error :unknown-topic-or-partition))
 
-          (throw e)))
-      (catch TimeoutException e
-        (assoc op :type :info, :error :timeout))))
+        (catch UnknownServerException e
+          (assoc op :type :fail, :error [:unknown-server-exception
+                                         (.getMessage e)]))
+
+        (catch TimeoutException _
+          (assoc op :type :info, :error :timeout)))))
 
   (teardown! [this test])
 
@@ -255,6 +290,343 @@
   []
   (map->Client {:extant-topics (atom #{})}))
 
+(defn txn-generator
+  "Takes a list-append generator and rewrites its transactions to be [:poll] or
+  [:send k v] micro-ops. Also adds a :keys field onto each operation, with a
+  set of keys that txn would have interacted with; we use this to generate
+  :subscribe ops later."
+  [la-gen]
+  (gen/map (fn rewrite-op [op]
+             (-> op
+                 (assoc :keys (set (map second (:value op))))
+                 (update :value
+                         (partial mapv (fn rewrite-mop [[f k v]]
+                                         (case f
+                                           :append [:send k v]
+                                           :r      [:poll]))))))
+           la-gen))
+
+(def subscribe-ratio
+  "How many subscribe ops should we issue per txn op?"
+  1/8)
+
+(defrecord InterleaveSubscribes [gen]
+  gen/Generator
+  (op [this test context]
+    ; When we're asked for an operation, ask the underlying generator for
+    ; one...
+    (when-let [[op gen'] (gen/op gen test context)]
+      (if (= :pending op)
+        [:pending this]
+        (let [this' (InterleaveSubscribes. gen')
+              op'   (dissoc op :keys)]
+          (if (< (rand) subscribe-ratio)
+            ; At random, emit a subscribe op instead.
+            [(gen/fill-in-op {:f :subscribe, :value (vec (:keys op))} context)
+             this]
+            ; Or pass through the op directly
+            [op' (InterleaveSubscribes. gen')])))))
+
+  ; Pass through updates
+  (update [this test context event]
+    (InterleaveSubscribes. (gen/update gen test context event))))
+
+(defn interleave-subscribes
+  "Takes a txn generator and keeps track of the keys flowing through it,
+  interspersing occasional :subscribe operations for recently seen keys."
+  [txn-gen]
+  (InterleaveSubscribes. txn-gen))
+
+(defn tag-rw
+  "Takes a generator and tags operations as :f :poll or :send if they're
+  entirely comprised of send/polls."
+  [gen]
+  (gen/map (fn tag-rw [op]
+             (case (->> op :value (map first) set)
+               #{:poll}  (assoc op :f :poll)
+               #{:send}  (assoc op :f :send)
+               op))
+           gen))
+
+;; Checker
+
+(defn assocv
+  "An assoc on vectors which allows you to assoc at arbitrary indexes, growing
+  the vector as needed. When v is nil, constructs a fresh vector rather than a
+  map."
+  [v i value]
+  (if v
+    (if (<= i (count v))
+      (assoc v i value)
+      (let [nils (repeat (- i (count v)) nil)]
+        (assoc (into v nils) i value)))
+    ; Nil is treated as an empty vector.
+    (recur [] i value)))
+
+(defn nth+
+  "Nth for vectors, but returns nil instead of out-of-bounds."
+  [v i]
+  (when (< i (count v))
+    (nth v i)))
+
+(defn version-orders-update-log
+  "Updates a version orders log with the given offset and value."
+  [log offset value]
+  (if-let [values (nth+ log offset)]
+    (assoc  log offset (conj values value)) ; Already have values
+    (assocv log offset #{value}))) ; First time we've seen this offset
+
+(defn version-orders-reduce-mop
+  "Takes a logs object from version-orders and a micro-op, and integrates that
+  micro-op's information about offsets into the logs."
+  [logs mop]
+  (case (first mop)
+    :send (let [[_ k v] mop]
+            (if (vector? v)
+              (let [[offset value] v]
+                (if offset
+                  ; We completed the send and know an offset
+                  (update logs k version-orders-update-log offset value)
+                  ; Not sure what the offset was
+                  logs))
+              ; Not even offset structure: maybe an :info txn
+              logs))
+
+    :poll (reduce (fn poll-key [logs [k pairs]]
+                    (reduce (fn pair [logs [offset value]]
+                              (if offset
+                                (update logs k version-orders-update-log
+                                        offset value)
+                                logs))
+                            logs
+                            pairs))
+                  logs
+                  (second mop))))
+
+(defn index-seq
+  "Takes a seq of distinct values, and returns a map of:
+
+    {:by-index    A vector of the sequence
+     :by-value    A map of values to their indices in the vector.}"
+  [xs]
+  {:by-index (vec xs)
+   :by-value (into {} (map-indexed (fn [i x] [x i]) xs))})
+
+(defn version-orders
+  "Takes a history and constructs a map of:
+
+  {:orders   A map of keys to orders for that key. Each order is a map of:
+               {:by-index  A vector of all values in log order.
+                :by-value  A map of values to indexes in the log.}
+
+   :errors   A series of error maps describing any incompatible orders, where
+             a single offset for a key maps to multiple values.}"
+  ([history]
+   (version-orders history {}))
+  ([history logs]
+   ; Logs is a map of keys to vectors, where index i in one of those vectors is
+   ; the vector of all observed values for that index.
+   (if (seq history)
+     (let [op       (first history)
+           history' (next history)]
+       (case (:type op)
+         ; There's nothing we can tell from invokes or fails
+         (:invoke, :fail) (recur history' logs)
+
+         ; Infos... right now nothing but we MIGHT be able to get partial info
+         ; later, so we'll process them anyway.
+         (case (:f op)
+           :subscribe (recur history' logs)
+
+           (:poll :send :txn) (recur history' (reduce version-orders-reduce-mop
+                                                      logs
+                                                      (:value op))))))
+     ; All done; transform our logs to orders.
+     {:errors (->> logs
+                   (mapcat (fn errors [[k log]]
+                             (->> log
+                                  (map-indexed (fn per-key [offset values]
+                                                 (when (< 1 (count values))
+                                                   {:key    k
+                                                    :offset offset
+                                                    :values values})))
+                                  (remove nil?))))
+                   seq)
+      :orders (map-vals (comp index-seq (partial keep first)) logs)})))
+
+(defn op-writes
+  "Returns a map of keys to the sequence of all values written in an op."
+  [op]
+  (reduce (fn [writes mop]
+            (if (= :send (first mop))
+              (let [[_ k v] mop
+                    vs (get writes k [])
+                    ; Values can be either a literal value or a [offset value]
+                    ; pair.
+                    value (if (vector? v) (second v) v)]
+                (assoc writes k (conj vs value)))
+              ; Something other than a send
+              writes))
+          {}
+          (:value op)))
+
+(defn op-reads
+  "Returns a map of keys to the sequence of all values read by an op for that
+  key."
+  [op]
+  (reduce (fn mop [writes mop]
+            (if (= :poll (first mop))
+              (reduce (fn per-key [writes [k pairs]]
+                        (let [vs  (get writes k [])
+                              vs' (into vs (map second pairs))]
+                          (assoc writes k vs')))
+                      writes
+                      (second mop))
+              writes))
+          {}
+          (:value op)))
+
+(defn reads-of-key
+  "Returns a seq of all operations which read the given key."
+  [k history]
+  (->> history
+       (filter (comp #{:txn :send :poll} :f))
+       (filter (fn [op]
+                 (contains? (op-reads op) k)))))
+
+(defn writes-of-key
+  "Returns a seq of all operations which wrote the given key."
+  [k history]
+  (->> history
+       (filter (comp #{:txn :send :poll} :f))
+       (filter (fn [op]
+                 (contains? (op-writes op) k)))))
+
+(defn writes-by-type
+  "Takes a history and constructs a map of types (:ok, :info, :fail) to maps of
+  keys to the set of all values which were written for that key. We use this to
+  identify, for instance, what all the known-failed writes were for a given
+  key."
+  [history]
+  (->> history
+       (remove (comp #{:invoke} :type))
+       (filter (comp #{:txn :send} :f))
+       (group-by :type)
+       (map-vals (fn [ops]
+                   (->> ops
+                        ; Construct a seq of {key [v1 v2 ...]} maps
+                        (map op-writes)
+                        ; And turn [v1 v2 ...] into #{v1 v2 ...}
+                        (map (partial map-vals set))
+                        ; Then merge them all together
+                        (reduce (partial merge-with set/union) {}))))))
+
+(defn reads-by-type
+  "Takes a history and constructs a map of types (:ok, :info, :fail) to maps of
+  keys to the set of all values which were read for that key. We use this to
+  identify, for instance, the known-successful reads for some key as a part of
+  finding lost updates."
+  [history]
+  (->> history
+       (remove (comp #{:invoke} :type))
+       (filter (comp #{:txn :poll} :f))
+       (group-by :type)
+       (map-vals (fn [ops]
+                   (->> ops
+                        (map op-reads)
+                        (map (partial map-vals set))
+                        (reduce (partial merge-with set/union) {}))))))
+
+(defn g1a-cases
+  "Takes a partial analysis and looks for aborted reads, where a known-failed
+  write is nonetheless visible to a committed read. Returns a seq of error
+  maps, or nil if none are found."
+  [{:keys [history writes-by-type]}]
+  (let [failed (:fail writes-by-type)
+        ops (->> history
+                 (filter (comp #{:ok} :type))
+                 (filter (comp #{:txn :poll} :f)))]
+    (->> (for [op     ops
+               [k vs] (op-reads op)
+               v      vs
+               :when (contains? (get failed k) v)]
+           {:op    op
+            :key   k
+            :value v})
+         seq)))
+
+(defn lost-update-cases
+  "Takes a partial analysis and looks for cases of lost update: where a write
+  that we *should* have observed is somehow not observed. Of course we cannot
+  expect to observe everything: for example, if we send a message to Redpanda
+  at the end of a test, and don't poll for it, there's no chance of us seeing
+  it at all! Or a poller could fall behind.
+
+  What we do instead is identify the highest read value for each key v_max, and
+  then take the set of all values *prior* to it in the version order: surely,
+  if we read v_max = 3, and the version order is [1 2 3 4], we should also have
+  read 1 and 2.
+
+  Once we've derived the set of values we ought to have read for some key k, we
+  run through each poll of k and cross off the values read. If there are any
+  values left, they must be lost updates."
+  [{:keys [history version-orders reads-by-type]}]
+  ; Start with all the values we know were read
+  (->> (:ok reads-by-type)
+       (keep (fn [[k vs]]
+              ; Great, now for this key, find the highest index observed
+              (let [vo         (get version-orders k)
+                    last-index (->> vs
+                                    (map (:by-value vo))
+                                    (reduce max -1))
+                    ; Now take a prefix of the version order up to that index;
+                    ; these are the values we should have observed.
+                    must-read (subvec (:by-index vo) 0 (inc last-index))
+                    ; Now we go *back* to the read values vs, and strip them
+                    ; out from the must-read vector; anything left is something
+                    ; we failed to read.
+                    lost (remove vs must-read)]
+                (when (seq lost)
+                  {:key  k
+                   :lost lost}))))
+       seq))
+
+(defn analysis
+  "Builds up intermediate data structures used to understand a history."
+  [history]
+  (let [history               (remove (comp #{:nemesis} :process) history)
+        version-orders        (version-orders history)
+        version-order-errors  (:errors version-orders)
+        version-orders        (:orders version-orders)
+        writes-by-type        (writes-by-type history)
+        reads-by-type         (reads-by-type history)
+        analysis              {:history        history
+                               :writes-by-type writes-by-type
+                               :reads-by-type  reads-by-type
+                               :version-orders version-orders}
+        g1a-cases             (g1a-cases analysis)
+        lost-update-cases     (lost-update-cases analysis)
+        ]
+    {:errors (cond-> {}
+               version-order-errors
+               (assoc :inconsistent-offsets version-order-errors)
+
+               g1a-cases
+               (assoc :g1a g1a-cases)
+
+               lost-update-cases
+               (assoc :lost-update lost-update-cases))
+     :version-orders version-orders}))
+
+(defn checker
+  []
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [analysis (analysis history)]
+        {:valid?          (empty? (:errors analysis))
+         :errors          (:errors analysis)
+         :version-orders  (:version-orders analysis)}))))
+
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
   an options map. Options are:
@@ -267,18 +639,14 @@
   (let [workload (append/test
                    (assoc opts
                           ; TODO: don't hardcode these
-                          :max-txn-length 1
+                          :max-txn-length 4
                           :consistency-models [:strict-serializable]))]
     (-> workload
-        (assoc :client (client))
-        ; Rewrite generator ops to use :f :read or :f :write if they're read or
-        ; write-only. Elle doesn't care, but this helps us visualize read vs
-        ; write perf better.
+        (assoc :client  (client)
+               :checker (checker))
         (update :generator
                 (fn wrap-gen [gen]
-                  (gen/map (fn tag-rw [op]
-                             (case (->> op :value (map first) set)
-                               #{:r}      (assoc op :f :read)
-                               #{:append} (assoc op :f :write)
-                               op))
-                           gen))))))
+                  (-> gen
+                      txn-generator
+                      tag-rw
+                      interleave-subscribes))))))
