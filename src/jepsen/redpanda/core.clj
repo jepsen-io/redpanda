@@ -104,7 +104,8 @@
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
-           {:name      (name workload-name)
+           {:name      (str (name workload-name)
+                            (when-let [acks (:acks opts)] (str " acks=" acks)))
             :db        db
             :os        debian/os
             :client    (:client workload)
