@@ -663,19 +663,29 @@
                         (let [{:keys [by-index by-value]} (get version-orders k)
                               ; What are their indices in the log?
                               i1 (get by-value v1)
-                              i2 (get by-value v2)]
-                          (when (and i1 i2 (< (inc i1) i2))
+                              i2 (get by-value v2)
+                              delta (if (and i1 i2)
+                                      (- i2 i1)
+                                      1)]
+                          (if (< 1 delta)
                             (let [skipped (map by-index (range (inc i1) i2))]
                               {:key      k
                                :values   [v1 v2]
+                               :delta    delta
                                :skipped  skipped
                                :op       op}))))
                       (remove nil?))))
        seq))
 
-(defn poll-skip-cases
-  "Takes a partial analysis and looks for cases where two successive operations
-  by a single process skipped over one or more values for some key."
+(defn poll-skip+nonmonotonic-cases
+  "Takes a partial analysis and checks each process's operations sequentially,
+  looking for cases where a single process either jumped backwards or skipped
+  over some region of a topic-partition. Returns a map:
+
+    {:nonmonotonic  Cases where a process started polling at or before a
+                    previous operation last left off
+     :skip          Cases where two successive operations by a single process
+                    skipped over one or more values for some key.}"
   [{:keys [history version-orders]}]
   ; First, group ops by process
   (->> (group-by :process history)
@@ -683,6 +693,8 @@
        ; index for each key.
        (map-vals
          (fn per-process [ops]
+           ; Iterate over this process's operations, building up a vector of
+           ; errors.
            (loop [ops        ops
                   errors     []
                   last-reads {}]
@@ -702,21 +714,32 @@
                                     v   (-> last-op op-reads (get k) last)
                                     v'  (first reads)
                                     i   (get vo v)
-                                    i'  (get vo v')]
-                                (if (and i i' (< (inc i) i'))
-                                  ; We can show that this op skipped an index!
-                                  (let [voi (-> version-orders (get k)
-                                                :by-index)
-                                        skipped (map voi (range (inc i) i'))]
-                                    {:key     k
-                                     :skipped skipped
-                                     :ops     [last-op op]})
-                                  ; Maybe later: nonmonotonic errors?
-                                  nil
-                                  ))
+                                    i'  (get vo v')
+                                    delta (if (and i i')
+                                            (- i' i)
+                                            1)]
+                                [(when (< 1 delta)
+                                   ; We can show that this op skipped an index!
+                                   (let [voi (-> version-orders (get k)
+                                                 :by-index)
+                                         skipped (map voi (range (inc i) i'))]
+                                     {:type    :skip
+                                      :key     k
+                                      :delta   delta
+                                      :skipped skipped
+                                      :ops     [last-op op]}))
+                                 (when (< delta 1)
+                                   ; Aha, this wasn't monotonic!
+                                   {:type   :nonmonotonic
+                                    :key    k
+                                    :values [v v']
+                                    :delta  (- i' i 1)
+                                    :ops    [last-op op]})])
                               ; First read of this key
                               nil))
-                     errs (remove nil? errs)
+                     errs (->> errs
+                               (mapcat identity)
+                               (remove nil?))
                      ; Update our last-reads index for this op's read keys
                      last-reads' (->> (keys reads)
                                       (reduce (fn update-last-read [lr k]
@@ -725,7 +748,9 @@
                  (recur (next ops) (into errors errs) last-reads'))))))
        ; Join together errors from all processes
        (mapcat val)
-       seq))
+       (group-by :type)
+       (map-vals (fn [errs]
+                   (seq (map #(dissoc % :type) errs))))))
 
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
@@ -742,7 +767,9 @@
                                :version-orders version-orders}
         g1a-cases             (g1a-cases analysis)
         lost-update-cases     (lost-update-cases analysis)
-        poll-skip-cases       (poll-skip-cases analysis)
+        poll-skip+nm-cases    (poll-skip+nonmonotonic-cases analysis)
+        poll-skip-cases       (:skip poll-skip+nm-cases)
+        nonmonotonic-poll-cases (:nonmonotonic poll-skip+nm-cases)
         int-poll-skip-cases   (int-poll-skip-cases analysis)
         ]
     {:errors (cond-> {}
@@ -755,11 +782,16 @@
                lost-update-cases
                (assoc :lost-update lost-update-cases)
 
+               poll-skip-cases
+               (assoc :poll-skip poll-skip-cases)
+
+               nonmonotonic-poll-cases
+               (assoc :nonmonotonic-poll nonmonotonic-poll-cases)
+
                int-poll-skip-cases
                (assoc :int-poll-skip int-poll-skip-cases)
 
-               poll-skip-cases
-               (assoc :poll-skip poll-skip-cases))
+               )
      :version-orders version-orders}))
 
 (defn checker

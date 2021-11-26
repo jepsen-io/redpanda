@@ -51,14 +51,37 @@
         write-6  {:process 2, :f :poll, :value [[:send :x [6 :f]]]}]
     (is (= [{:key :x
              :ops [poll-1-2 poll-4]
+             :delta 2
              :skipped [:c]}
             {:key :x
              :ops [poll-4 poll-7]
+             :delta 2
              :skipped [:f]}]
            (-> [poll-1-2 poll-3 poll-4 write-6 poll-7]
                analysis
                :errors
                :poll-skip)))))
+
+(deftest nonmonotonic-poll-test
+  ; A nonmonotonic poll occurs when a single process performs two transactions,
+  ; t1 and t2, both of which poll key k, and t2 begins with a value from k
+  ; *prior* to t1's final value.
+  ;
+  ; Here process 0 polls 1 2 3, then goes back and reads 2 ... again.
+  (let [poll-123 {:process 0, :f :poll, :value [[:poll {:x [[1 :a],
+                                                            [2 :b]
+                                                            [3 :c]]}]]}
+        poll-234 {:process 0, :f :poll, :value [[:poll {:x [[2 :b]
+                                                            [3 :c]
+                                                            [4 :d]]}]]}]
+    (is (= [{:key    :x
+             :ops    [poll-123 poll-234]
+             :values [:c :b]
+             :delta  -2}]
+           (-> [poll-123 poll-234]
+               analysis
+               :errors
+               :nonmonotonic-poll)))))
 
 (deftest int-poll-skip-test
   ; An *internal poll skip* occurs when within the scope of a single
@@ -75,10 +98,12 @@
     (is (= [{:key :x
              :values  [:a :d]
              :skipped [:b]
+             :delta 2
              :op poll-1-4a}
             {:key :x
              :values  [:a :d]
              :skipped [:b]
+             :delta 2
              :op poll-1-4b}]
            (-> [poll-1-4a poll-1-4b poll-2]
                analysis
