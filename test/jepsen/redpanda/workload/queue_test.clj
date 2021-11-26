@@ -59,3 +59,28 @@
                analysis
                :errors
                :poll-skip)))))
+
+(deftest int-poll-skip-test
+  ; An *internal poll skip* occurs when within the scope of a single
+  ; transaction successive calls to poll() skip over a message we know exists.
+  ;
+  ; One op observes offsets 1 and 4, but another observes offset 2, which tells
+  ; us a gap exists.
+  (let [; Skip within a poll
+        poll-1-4a {:f :poll, :value [[:poll {:x [[1 :a], [4 :d]]}]]}
+        ; Skip between polls
+        poll-1-4b {:f :poll, :value [[:poll {:x [[1 :a]]}]
+                                     [:poll {:x [[4 :d]]}]]}
+        poll-2 {:f :poll, :value [[:poll {:x [[2 :b]]}]]}]
+    (is (= [{:key :x
+             :values  [:a :d]
+             :skipped [:b]
+             :op poll-1-4a}
+            {:key :x
+             :values  [:a :d]
+             :skipped [:b]
+             :op poll-1-4b}]
+           (-> [poll-1-4a poll-1-4b poll-2]
+               analysis
+               :errors
+               :int-poll-skip)))))

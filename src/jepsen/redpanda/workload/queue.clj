@@ -496,34 +496,36 @@
 (defn op-writes
   "Returns a map of keys to the sequence of all values written in an op."
   [op]
-  (reduce (fn [writes mop]
-            (if (= :send (first mop))
-              (let [[_ k v] mop
-                    vs (get writes k [])
-                    ; Values can be either a literal value or a [offset value]
-                    ; pair.
-                    value (if (vector? v) (second v) v)]
-                (assoc writes k (conj vs value)))
-              ; Something other than a send
-              writes))
-          {}
-          (:value op)))
+  (when (#{:txn :send} (:f op))
+    (reduce (fn [writes mop]
+              (if (= :send (first mop))
+                (let [[_ k v] mop
+                      vs (get writes k [])
+                      ; Values can be either a literal value or a [offset value]
+                      ; pair.
+                      value (if (vector? v) (second v) v)]
+                  (assoc writes k (conj vs value)))
+                ; Something other than a send
+                writes))
+            {}
+            (:value op))))
 
 (defn op-reads
   "Returns a map of keys to the sequence of all values read by an op for that
   key."
   [op]
-  (reduce (fn mop [writes mop]
-            (if (= :poll (first mop))
-              (reduce (fn per-key [writes [k pairs]]
-                        (let [vs  (get writes k [])
-                              vs' (into vs (map second pairs))]
-                          (assoc writes k vs')))
-                      writes
-                      (second mop))
-              writes))
-          {}
-          (:value op)))
+  (when (#{:txn :poll} (:f op))
+    (reduce (fn mop [writes mop]
+              (if (= :poll (first mop))
+                (reduce (fn per-key [writes [k pairs]]
+                          (let [vs  (get writes k [])
+                                vs' (into vs (map second pairs))]
+                            (assoc writes k vs')))
+                        writes
+                        (second mop))
+                writes))
+            {}
+            (:value op))))
 
 (defn reads-of-key
   "Returns a seq of all operations which read the given key, and, optionally,
@@ -648,6 +650,29 @@
                    :lost lost}))))
        seq))
 
+(defn int-poll-skip-cases
+  "Takes a partial analysis and looks for cases where a single transaction
+  contains a pair of poll operations which read the same key and skip over some
+  element of the log which we know should exist."
+  [{:keys [history version-orders]}]
+  (->> history
+       (mapcat (fn per-op [op]
+                 ; Consider each pair of reads of some key in this op...
+                 (->> (for [[k vs]  (op-reads op)
+                            [v1 v2] (partition 2 1 vs)]
+                        (let [{:keys [by-index by-value]} (get version-orders k)
+                              ; What are their indices in the log?
+                              i1 (get by-value v1)
+                              i2 (get by-value v2)]
+                          (when (and i1 i2 (< (inc i1) i2))
+                            (let [skipped (map by-index (range (inc i1) i2))]
+                              {:key      k
+                               :values   [v1 v2]
+                               :skipped  skipped
+                               :op       op}))))
+                      (remove nil?))))
+       seq))
+
 (defn poll-skip-cases
   "Takes a partial analysis and looks for cases where two successive operations
   by a single process skipped over one or more values for some key."
@@ -699,7 +724,8 @@
                                               last-reads))]
                  (recur (next ops) (into errors errs) last-reads'))))))
        ; Join together errors from all processes
-       (mapcat val)))
+       (mapcat val)
+       seq))
 
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
@@ -717,6 +743,7 @@
         g1a-cases             (g1a-cases analysis)
         lost-update-cases     (lost-update-cases analysis)
         poll-skip-cases       (poll-skip-cases analysis)
+        int-poll-skip-cases   (int-poll-skip-cases analysis)
         ]
     {:errors (cond-> {}
                version-order-errors
@@ -728,6 +755,9 @@
                lost-update-cases
                (assoc :lost-update lost-update-cases)
 
+               int-poll-skip-cases
+               (assoc :int-poll-skip int-poll-skip-cases)
+
                poll-skip-cases
                (assoc :poll-skip poll-skip-cases))
      :version-orders version-orders}))
@@ -736,10 +766,16 @@
   []
   (reify checker/Checker
     (check [this test history opts]
-      (let [analysis (analysis history)]
-        {:valid?          (empty? (:errors analysis))
+      (let [analysis (analysis history)
+            bad-errors (-> (:errors analysis)
+                           ; I think these might just be normal behavior when
+                           ; we call consumer.assign()
+                           (dissoc :poll-skip))]
+        {:valid?          (empty? bad-errors)
          :errors          (:errors analysis)
-         :version-orders  (:version-orders analysis)}))))
+         :version-orders  (->> (:version-orders analysis)
+                               (map-vals :by-index)
+                               (into (sorted-map)))}))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
