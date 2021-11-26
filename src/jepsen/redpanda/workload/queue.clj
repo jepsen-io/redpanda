@@ -650,10 +650,14 @@
                    :lost lost}))))
        seq))
 
-(defn int-poll-skip-cases
+(defn int-poll-skip+nonmonotonic-cases
   "Takes a partial analysis and looks for cases where a single transaction
-  contains a pair of poll operations which read the same key and skip over some
-  element of the log which we know should exist."
+  contains:
+
+    {:skip          A pair of poll values which read the same key and skip
+                    over some part of the log which we know should exist.
+     :nonmonotonic A pair of poll values which *contradict* the log order,
+                   or repeat the same value.}"
   [{:keys [history version-orders]}]
   (->> history
        (mapcat (fn per-op [op]
@@ -667,15 +671,24 @@
                               delta (if (and i1 i2)
                                       (- i2 i1)
                                       1)]
-                          (if (< 1 delta)
-                            (let [skipped (map by-index (range (inc i1) i2))]
-                              {:key      k
-                               :values   [v1 v2]
-                               :delta    delta
-                               :skipped  skipped
-                               :op       op}))))
+                          (cond (< 1 delta)
+                                {:type     :skip
+                                 :key      k
+                                 :values   [v1 v2]
+                                 :delta    delta
+                                 :skipped  (map by-index (range (inc i1) i2))
+                                 :op       op}
+
+                                (< delta 1)
+                                {:type    :nonmonotonic
+                                 :key     k
+                                 :values  [v1 v2]
+                                 :delta   delta
+                                 :op      op})))
                       (remove nil?))))
-       seq))
+       (group-by :type)
+       (map-vals (fn [errs]
+                   (seq (map #(dissoc % :type) errs))))))
 
 (defn poll-skip+nonmonotonic-cases
   "Takes a partial analysis and checks each process's operations sequentially,
@@ -770,7 +783,9 @@
         poll-skip+nm-cases    (poll-skip+nonmonotonic-cases analysis)
         poll-skip-cases       (:skip poll-skip+nm-cases)
         nonmonotonic-poll-cases (:nonmonotonic poll-skip+nm-cases)
-        int-poll-skip-cases   (int-poll-skip-cases analysis)
+        int-poll-skip+nm-cases  (int-poll-skip+nonmonotonic-cases analysis)
+        int-poll-skip-cases   (:skip int-poll-skip+nm-cases)
+        int-nm-poll-cases     (:nonmonotonic int-poll-skip+nm-cases)
         ]
     {:errors (cond-> {}
                version-order-errors
@@ -790,6 +805,9 @@
 
                int-poll-skip-cases
                (assoc :int-poll-skip int-poll-skip-cases)
+
+               int-nm-poll-cases
+               (assoc :int-nonmonotonic-poll int-nm-poll-cases)
 
                )
      :version-orders version-orders}))

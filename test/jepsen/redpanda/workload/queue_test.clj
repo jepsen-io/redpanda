@@ -85,7 +85,8 @@
 
 (deftest int-poll-skip-test
   ; An *internal poll skip* occurs when within the scope of a single
-  ; transaction successive calls to poll() skip over a message we know exists.
+  ; transaction successive calls to poll() (or a single poll()) skip over a
+  ; message we know exists.
   ;
   ; One op observes offsets 1 and 4, but another observes offset 2, which tells
   ; us a gap exists.
@@ -109,3 +110,22 @@
                analysis
                :errors
                :int-poll-skip)))))
+
+(deftest int-nonmonotonic-poll-test
+  ; An *internal nonmonotonic poll* occurs within the scope of a single
+  ; transaction, where one or more poll() calls yield a pair of values such
+  ; that the former has an equal or higher offset than the latter.
+  (let [poll-31a {:f :poll, :value [[:poll {:x [[3 :c] [1 :a]]}]]}
+        ; This read of :b tells us there was an index between :a and :c; the
+        ; delta is therefore -2.
+        poll-33b {:f :poll, :value [[:poll {:x [[2 :b] [3 :c]]}]
+                                    [:poll {:x [[3 :c]]}]]}]
+    (is (= [{:key    :x
+             :values [:c :a]
+             :delta  -2
+             :op poll-31a}
+            {:key    :x
+             :values [:c :c]
+             :delta  0
+             :op     poll-33b}]
+           (-> [poll-31a poll-33b] analysis :errors :int-nonmonotonic-poll)))))
