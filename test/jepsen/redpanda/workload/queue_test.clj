@@ -39,3 +39,23 @@
     (is (= [{:key :x
              :lost [:a :b]}]
            (-> [send-a send-bd poll] analysis :errors :lost-update)))))
+
+(deftest poll-skip-test
+  ; Process 0 observes offsets 1, 2, then 4, then 7, but we know 3 and 6
+  ; existed due to other reads/writes. 5 might actually be a gap in the log.
+  (let [poll-1-2 {:process 0, :f :poll, :value [[:poll {:x [[1 :a], [2 :b]]}]]}
+        poll-4   {:process 0, :f :poll, :value [[:poll {:x [[4 :d]]}]]}
+        poll-7   {:process 0, :f :poll, :value [[:poll {:x [[7 :g]]}]]}
+        ; Reads and writes that let us know offsets 3 and 5 existed
+        poll-3   {:process 1, :f :poll, :value [[:poll {:x [[3 :c]]}]]}
+        write-6  {:process 2, :f :poll, :value [[:send :x [6 :f]]]}]
+    (is (= [{:key :x
+             :ops [poll-1-2 poll-4]
+             :skipped [:c]}
+            {:key :x
+             :ops [poll-4 poll-7]
+             :skipped [:f]}]
+           (-> [poll-1-2 poll-3 poll-4 write-6 poll-7]
+               analysis
+               :errors
+               :poll-skip)))))

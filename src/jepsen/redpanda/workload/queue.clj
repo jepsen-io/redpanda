@@ -648,6 +648,59 @@
                    :lost lost}))))
        seq))
 
+(defn poll-skip-cases
+  "Takes a partial analysis and looks for cases where two successive operations
+  by a single process skipped over one or more values for some key."
+  [{:keys [history version-orders]}]
+  ; First, group ops by process
+  (->> (group-by :process history)
+       ; Then reduce each process, keeping track of the most recent read
+       ; index for each key.
+       (map-vals
+         (fn per-process [ops]
+           (loop [ops        ops
+                  errors     []
+                  last-reads {}]
+             (if-not (seq ops)
+               ; Done
+               errors
+               ; Process this op
+               (let [op    (first ops)
+                     reads (op-reads op)
+                     ; Look at each key and values read by this op.
+                     errs (for [[k reads] reads]
+                            ; What was the last op that read this key?
+                            (if-let [last-op (get last-reads k)]
+                              ; Compare the index of the last thing read by the
+                              ; last op read to the index of our first read
+                              (let [vo  (get-in version-orders [k :by-value])
+                                    v   (-> last-op op-reads (get k) last)
+                                    v'  (first reads)
+                                    i   (get vo v)
+                                    i'  (get vo v')]
+                                (if (and i i' (< (inc i) i'))
+                                  ; We can show that this op skipped an index!
+                                  (let [voi (-> version-orders (get k)
+                                                :by-index)
+                                        skipped (map voi (range (inc i) i'))]
+                                    {:key     k
+                                     :skipped skipped
+                                     :ops     [last-op op]})
+                                  ; Maybe later: nonmonotonic errors?
+                                  nil
+                                  ))
+                              ; First read of this key
+                              nil))
+                     errs (remove nil? errs)
+                     ; Update our last-reads index for this op's read keys
+                     last-reads' (->> (keys reads)
+                                      (reduce (fn update-last-read [lr k]
+                                                (assoc lr k op))
+                                              last-reads))]
+                 (recur (next ops) (into errors errs) last-reads'))))))
+       ; Join together errors from all processes
+       (mapcat val)))
+
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
   [history]
@@ -663,6 +716,7 @@
                                :version-orders version-orders}
         g1a-cases             (g1a-cases analysis)
         lost-update-cases     (lost-update-cases analysis)
+        poll-skip-cases       (poll-skip-cases analysis)
         ]
     {:errors (cond-> {}
                version-order-errors
@@ -672,7 +726,10 @@
                (assoc :g1a g1a-cases)
 
                lost-update-cases
-               (assoc :lost-update lost-update-cases))
+               (assoc :lost-update lost-update-cases)
+
+               poll-skip-cases
+               (assoc :poll-skip poll-skip-cases))
      :version-orders version-orders}))
 
 (defn checker
