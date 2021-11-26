@@ -281,8 +281,16 @@
                   txn' (mapv (partial mop! this) txn)]
               ; If we read, commit offsets.
               (when (#{:poll :txn} (:f op))
-                (.commitSync consumer))
-
+                (try (.commitSync consumer)
+                     ; If we crash during commitSync *outside* a transaction,
+                     ; it might be that we poll()ed some values in this txn
+                     ; which Kafka will think we consumed. We won't have
+                     ; any record of them if we fail the txn. Instead, we
+                     ; return an :ok txn *with* the reads, but note the lack of
+                     ; commit.
+                     (catch RuntimeException e
+                       (assoc op :type :ok, :value txn',
+                              :error [:consumer-commit (.getMessage e)]))))
               ; TODO: enable txns, write some kind of macro for commit/abort.
               ;(.commitTransaction producer)
               ;(.abortTransaction producer)
@@ -308,7 +316,12 @@
   (close! [this test]
     (rc/close! admin)
     (rc/close! producer)
-    (rc/close! consumer)))
+    (rc/close! consumer))
+
+  client/Reusable
+  (reusable? [this test]
+    ; Later we might want to explicitly crash and tear down our client.
+    true))
 
 (defn client
   "Constructs a fresh client for this workload."
@@ -683,7 +696,7 @@
   (let [workload (append/test
                    (assoc opts
                           ; TODO: don't hardcode these
-                          :max-txn-length 4
+                          :max-txn-length 1
                           :consistency-models [:strict-serializable]))]
     (-> workload
         (assoc :client  (client)
