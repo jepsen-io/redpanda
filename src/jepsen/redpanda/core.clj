@@ -105,7 +105,12 @@
     (merge tests/noop-test
            opts
            {:name      (str (name workload-name)
-                            (when-let [acks (:acks opts)] (str " acks=" acks)))
+                            " "
+                            (->> opts :sub-via (map name) sort (str/join ","))
+                            (when-let [acks (:acks opts)] (str " acks=" acks))
+                            (when-let [r (:retries opts)] (str " retries=" r))
+                            (when-let [aor (:auto-offset-reset opts)]
+                              (str " aor=" aor)))
             :db        db
             :os        debian/os
             :client    (:client workload)
@@ -178,7 +183,7 @@
     :parse-fn util/parse-long]
 
    [nil "--sub-via STRATEGIES" "A comma-separated list like `assign,subscribe`, which denotes how we ask clients to assign topics to themselves."
-    :default #{:assign :subscribe}
+    :default #{:subscribe}
     :parse-fn (comp set parse-comma-kws)
     :validate [#(every? #{:assign :subscribe} %)
                "Can only be assign and/or subscribe"]]
