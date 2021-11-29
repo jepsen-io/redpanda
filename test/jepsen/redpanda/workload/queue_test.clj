@@ -111,6 +111,26 @@
                :errors
                :int-poll-skip)))))
 
+(deftest int-send-skip-test
+  ; An *internal send skip* occurs when within the scope of a single
+  ; transaction successive calls to send() wind up inserting to offsets which
+  ; have other offsets between them.
+  ;
+  ; Here a single op inserts mixed in with another. We know a's offset, but we
+  ; don't know c's. A poll, however, tells us there exists a b between them,
+  ; and that c's offset is 3.
+  (let [send-13 {:type :ok, :f :send, :value [[:send :x [1 :a]] [:send :x :c]]}
+        poll-23 {:type :ok, :f :poll, :value [[:poll {:x [[2 :b] [3 :c]]}]]}]
+    (is (= [{:key     :x
+             :values  [:a :c]
+             :skipped [:b]
+             :delta   2
+             :op      send-13}]
+           (-> [send-13 poll-23]
+               analysis
+               :errors
+               :int-send-skip)))))
+
 (deftest int-nonmonotonic-poll-test
   ; An *internal nonmonotonic poll* occurs within the scope of a single
   ; transaction, where one or more poll() calls yield a pair of values such
@@ -129,6 +149,29 @@
              :delta  0
              :op     poll-33b}]
            (-> [poll-31a poll-33b] analysis :errors :int-nonmonotonic-poll)))))
+
+(deftest int-nonmonotonic-send-test
+  ; An *internal nonmonotonic send* occurs within the scope of a single
+  ; transaction, where two calls to send() insert values in an order which
+  ; contradicts the version order.
+  (let [; In this case, the offsets are directly out of order.
+        send-31a {:type :ok, :f :send, :value [[:send :x [3 :c]]
+                                               [:send :x [1 :a]]]}
+        ; Or we can infer the order contradiction from poll offsets
+        send-42b {:type :info, :f :send, :value [[:send :y :d] [:send :y :b]]}
+        poll-42b {:type :info, :f :poll, :value [[:poll {:y [[2 :b]
+                                                             [3 :c]
+                                                             [4 :d]]}]]}]
+    (is (= [{:key    :x
+             :values [:c :a]
+             :delta  -1
+             :op     send-31a}
+            {:key    :y
+             :values [:d :b]
+             :delta  -2
+             :op     send-42b}]
+           (-> [send-31a send-42b poll-42b]
+               analysis :errors :int-nonmonotonic-send)))))
 
 (deftest duplicate-test
   ; A duplicate here means that a single value winds up at multiple positions

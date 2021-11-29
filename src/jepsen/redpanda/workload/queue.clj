@@ -650,6 +650,12 @@
                    :lost lost}))))
        seq))
 
+(defn strip-types
+  "Takes a collection of maps, and removes their :type fields. Returns nil if
+  none remain."
+  [ms]
+  (seq (map (fn [m] (dissoc m :type)) ms)))
+
 (defn int-poll-skip+nonmonotonic-cases
   "Takes a partial analysis and looks for cases where a single transaction
   contains:
@@ -687,8 +693,43 @@
                                  :op      op})))
                       (remove nil?))))
        (group-by :type)
-       (map-vals (fn [errs]
-                   (seq (map #(dissoc % :type) errs))))))
+       (map-vals strip-types)))
+
+(defn int-send-skip+nonmonotonic-cases
+  "Takes a partial analysis and looks for cases where a single transaction
+  contains a pair of sends to the same key which:
+
+    {:skip          Skips over some indexes of the log
+     :nonmonotonic  Go backwards (or stay in the same place) in the log}"
+  [{:keys [history version-orders]}]
+  (->> history
+       (mapcat (fn per-op [op]
+                 ; Consider each pair of sends to a given key in this op...
+                 (->> (for [[k vs]  (op-writes op)
+                            [v1 v2] (partition 2 1 vs)]
+                        (let [{:keys [by-index by-value]} (get version-orders k)
+                              i1 (get by-value v1)
+                              i2 (get by-value v2)
+                              delta (if (and i1 i2)
+                                      (- i2 i1)
+                                      1)]
+                          (cond (< 1 delta)
+                                {:type    :skip
+                                 :key     :x
+                                 :values  [v1 v2]
+                                 :delta   delta
+                                 :skipped (map by-index (range (inc i1) i2))
+                                 :op      op}
+
+                                (< delta 1)
+                                {:type   :nonmonotonic
+                                 :key    k
+                                 :values [v1 v2]
+                                 :delta  delta
+                                 :op     op})))
+                      (remove nil?))))
+       (group-by :type)
+       (map-vals strip-types)))
 
 (defn poll-skip+nonmonotonic-cases
   "Takes a partial analysis and checks each process's operations sequentially,
@@ -762,8 +803,7 @@
        ; Join together errors from all processes
        (mapcat val)
        (group-by :type)
-       (map-vals (fn [errs]
-                   (seq (map #(dissoc % :type) errs))))))
+       (map-vals strip-types)))
 
 (defn duplicate-cases
   "Takes a partial analysis and identifies cases where a single value appears
@@ -802,6 +842,9 @@
         int-poll-skip+nm-cases  (int-poll-skip+nonmonotonic-cases analysis)
         int-poll-skip-cases   (:skip int-poll-skip+nm-cases)
         int-nm-poll-cases     (:nonmonotonic int-poll-skip+nm-cases)
+        int-send-skip+nm-cases (int-send-skip+nonmonotonic-cases analysis)
+        int-send-skip-cases   (:skip int-send-skip+nm-cases)
+        int-nm-send-cases     (:nonmonotonic int-send-skip+nm-cases)
         duplicate-cases       (duplicate-cases analysis)
         ]
     {:errors (cond-> {}
@@ -828,6 +871,12 @@
 
                int-nm-poll-cases
                (assoc :int-nonmonotonic-poll int-nm-poll-cases)
+
+               int-nm-send-cases
+               (assoc :int-nonmonotonic-send int-nm-send-cases)
+
+               int-send-skip-cases
+               (assoc :int-send-skip int-send-skip-cases)
 
                )
      :version-orders version-orders}))
