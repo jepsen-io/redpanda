@@ -810,8 +810,9 @@
   looking for cases where a single process's sends to a given key go backwards
   relative to the version order."
   [{:keys [history version-orders]}]
-  ; First, group ops by process
-  (->> (group-by :process history)
+  ; First, consider each process' completions...
+  (->> (filter (comp #{:ok :info} :type) history)
+       (group-by :process)
        ; Then reduce each process, keeping track of the most recent sent
        ; index for each key.
        (map-vals
@@ -952,9 +953,10 @@
                            (dissoc :poll-skip))]
         {:valid?          (empty? bad-errors)
          :errors          (:errors analysis)
-         :version-orders  (->> (:version-orders analysis)
-                               (map-vals :by-index)
-                               (into (sorted-map)))}))))
+         ;:version-orders  (->> (:version-orders analysis)
+         ;                      (map-vals :by-index)
+         ;                      (into (sorted-map)))
+         }))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
