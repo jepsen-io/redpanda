@@ -787,7 +787,7 @@
                                    {:type   :nonmonotonic
                                     :key    k
                                     :values [v v']
-                                    :delta  (- i' i 1)
+                                    :delta  delta
                                     :ops    [last-op op]})])
                               ; First read of this key
                               nil))
@@ -804,6 +804,62 @@
        (mapcat val)
        (group-by :type)
        (map-vals strip-types)))
+
+(defn nonmonotonic-send-cases
+  "Takes a partial analysis and checks each process's operations sequentially,
+  looking for cases where a single process's sends to a given key go backwards
+  relative to the version order."
+  [{:keys [history version-orders]}]
+  ; First, group ops by process
+  (->> (group-by :process history)
+       ; Then reduce each process, keeping track of the most recent sent
+       ; index for each key.
+       (map-vals
+         (fn per-process [ops]
+           ; Iterate over this process's operations, building up a vector of
+           ; errors.
+           (loop [ops        ops
+                  errors     []
+                  last-sends {}] ; Key -> Most recent op to send to that key
+             (if-not (seq ops)
+               ; Done
+               errors
+               ; Process this op
+               (let [op    (first ops)
+                     ; Look at each key and values sent by this op.
+                     sends (op-writes op)
+                     errs (for [[k sends] sends]
+                            ; What was the last op that sent to this key?
+                            (if-let [last-op (get last-sends k)]
+                              ; Compare the index of the last thing sent by the
+                              ; last op to the index of our first send
+                              (let [vo  (get-in version-orders [k :by-value])
+                                    v   (-> last-op op-writes (get k) last)
+                                    v'  (first sends)
+                                    i   (get vo v)
+                                    i'  (get vo v')
+                                    delta (if (and i i')
+                                            (- i' i)
+                                            1)]
+                                 (when (< delta 1)
+                                   ; Aha, this wasn't monotonic!
+                                   {:key    k
+                                    :values [v v']
+                                    :delta  (- i' i)
+                                    :ops    [last-op op]}))
+                              ; First send to this key
+                              nil))
+                     errs (->> errs
+                               (remove nil?))
+                     ; Update our last-reads index for this op's sent keys
+                     last-sends' (->> (keys sends)
+                                      (reduce (fn update-last-send [lr k]
+                                                (assoc lr k op))
+                                              last-sends))]
+                 (recur (next ops) (into errors errs) last-sends'))))))
+       ; Join together errors from all processes
+       (mapcat val)
+       seq))
 
 (defn duplicate-cases
   "Takes a partial analysis and identifies cases where a single value appears
@@ -839,6 +895,7 @@
         poll-skip+nm-cases    (poll-skip+nonmonotonic-cases analysis)
         poll-skip-cases       (:skip poll-skip+nm-cases)
         nonmonotonic-poll-cases (:nonmonotonic poll-skip+nm-cases)
+        nonmonotonic-send-cases (nonmonotonic-send-cases analysis)
         int-poll-skip+nm-cases  (int-poll-skip+nonmonotonic-cases analysis)
         int-poll-skip-cases   (:skip int-poll-skip+nm-cases)
         int-nm-poll-cases     (:nonmonotonic int-poll-skip+nm-cases)
@@ -851,20 +908,6 @@
                duplicate-cases
                (assoc :duplicate duplicate-cases)
 
-               version-order-errors
-               (assoc :inconsistent-offsets version-order-errors)
-
-               g1a-cases
-               (assoc :g1a g1a-cases)
-
-               lost-update-cases
-               (assoc :lost-update lost-update-cases)
-
-               poll-skip-cases
-               (assoc :poll-skip poll-skip-cases)
-
-               nonmonotonic-poll-cases
-               (assoc :nonmonotonic-poll nonmonotonic-poll-cases)
 
                int-poll-skip-cases
                (assoc :int-poll-skip int-poll-skip-cases)
@@ -877,6 +920,23 @@
 
                int-send-skip-cases
                (assoc :int-send-skip int-send-skip-cases)
+               version-order-errors
+               (assoc :inconsistent-offsets version-order-errors)
+
+               g1a-cases
+               (assoc :g1a g1a-cases)
+
+               lost-update-cases
+               (assoc :lost-update lost-update-cases)
+
+               nonmonotonic-poll-cases
+               (assoc :nonmonotonic-poll nonmonotonic-poll-cases)
+
+               nonmonotonic-send-cases
+               (assoc :nonmonotonic-send nonmonotonic-send-cases)
+
+               poll-skip-cases
+               (assoc :poll-skip poll-skip-cases)
 
                )
      :version-orders version-orders}))

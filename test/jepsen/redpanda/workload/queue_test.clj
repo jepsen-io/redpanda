@@ -77,11 +77,25 @@
     (is (= [{:key    :x
              :ops    [poll-123 poll-234]
              :values [:c :b]
-             :delta  -2}]
-           (-> [poll-123 poll-234]
-               analysis
-               :errors
-               :nonmonotonic-poll)))))
+             :delta  -1}]
+           (-> [poll-123 poll-234] analysis :errors :nonmonotonic-poll)))))
+
+(deftest nonmonotonic-send-test
+  ; A nonmonotonic send occurs when a single process performs two transactions
+  ; t1 and t2, both of which send to key k, and t1's first send winds up
+  ; ordered at or before t2's last send in the log.
+  ;
+  ; Here process 0 sends offsets 3, 4, then sends 1, 2
+  (let [send-34 {:process 0, :f :send, :value [[:send :x [3 :c]]
+                                               [:send :x [4 :d]]]}
+        send-12 {:process 0, :f :send, :value [[:send :x [1 :a]]
+                                               [:send :x [2 :b]]]}]
+    (is (= [{:key    :x
+             :values [:d :a]
+             :delta  -3
+             :ops    [send-34 send-12]}]
+            (-> [send-34 send-12] analysis :errors :nonmonotonic-send)))))
+
 
 (deftest int-poll-skip-test
   ; An *internal poll skip* occurs when within the scope of a single
