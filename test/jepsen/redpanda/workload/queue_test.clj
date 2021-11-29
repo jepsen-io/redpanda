@@ -129,3 +129,16 @@
              :delta  0
              :op     poll-33b}]
            (-> [poll-31a poll-33b] analysis :errors :int-nonmonotonic-poll)))))
+
+(deftest duplicate-test
+  ; A duplicate here means that a single value winds up at multiple positions
+  ; in the log--reading the same log offset multiple times is a nonmonotonic
+  ; poll.
+  (let [; Here we have a send operation which puts a to 1, and a poll which
+        ; reads a at 3; it must have been at both.
+        send-a1 {:type :ok, :f :send, :value [[:send :x [1 :a]]]}
+        poll-a3 {:type :ok, :f :poll, :value [[:poll {:x [[2 :b] [3 :a]]}]]}]
+    (is (= [{:key   :x
+             :value :a
+             :count 2}]
+           (-> [send-a1 poll-a3] analysis :errors :duplicate)))))

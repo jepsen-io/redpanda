@@ -765,6 +765,22 @@
        (map-vals (fn [errs]
                    (seq (map #(dissoc % :type) errs))))))
 
+(defn duplicate-cases
+  "Takes a partial analysis and identifies cases where a single value appears
+  at more than one offset in a key."
+  [{:keys [version-orders]}]
+  (->> version-orders
+       (mapcat (fn per-key [[k version-order]]
+                 (->> (:by-index version-order)
+                      frequencies
+                      (filter (fn dup? [[value number]]
+                                (< 1 number)))
+                      (map (fn [[value number]]
+                             {:key    k
+                              :value  value
+                              :count  number})))))
+       seq))
+
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
   [history]
@@ -786,8 +802,12 @@
         int-poll-skip+nm-cases  (int-poll-skip+nonmonotonic-cases analysis)
         int-poll-skip-cases   (:skip int-poll-skip+nm-cases)
         int-nm-poll-cases     (:nonmonotonic int-poll-skip+nm-cases)
+        duplicate-cases       (duplicate-cases analysis)
         ]
     {:errors (cond-> {}
+               duplicate-cases
+               (assoc :duplicate duplicate-cases)
+
                version-order-errors
                (assoc :inconsistent-offsets version-order-errors)
 
