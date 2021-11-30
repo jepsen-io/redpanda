@@ -112,7 +112,9 @@
                             (when-let [acks (:acks opts)] (str " acks=" acks))
                             (when-let [r (:retries opts)] (str " retries=" r))
                             (when-let [aor (:auto-offset-reset opts)]
-                              (str " aor=" aor)))
+                              (str " aor=" aor))
+                            (when-let [n (:nemesis opts)]
+                              (str " " (->> n (map name) sort (str/join ",")))))
             :db        db
             :os        debian/os
             :client    (:client workload)

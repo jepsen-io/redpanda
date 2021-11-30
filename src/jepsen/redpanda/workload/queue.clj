@@ -282,8 +282,11 @@
             ;(.beginTransaction producer)
             (let [txn  (:value op)
                   txn' (mapv (partial mop! this) txn)]
-              ; If we read, commit offsets.
-              (when (#{:poll :txn} (:f op))
+              ; If we read, AND we're using :subscribe instead of assign,
+              ; commit offsets. My understanding is that with assign you're not
+              ; supposed to use the offset system?
+              (when (and (#{:poll :txn} (:f op))
+                         (:subscribe (:sub-via test)))
                 (try (.commitSync consumer)
                      ; If we crash during commitSync *outside* a transaction,
                      ; it might be that we poll()ed some values in this txn
@@ -768,53 +771,71 @@
                ; Done
                errors
                ; Process this op
-               (let [op    (first ops)
-                     reads (op-reads op)
-                     ; Look at each key and values read by this op.
-                     errs (for [[k reads] reads]
-                            ; What was the last op that read this key?
-                            (if-let [last-op (get last-reads k)]
-                              ; Compare the index of the last thing read by the
-                              ; last op read to the index of our first read
-                              (let [vo  (get-in version-orders [k :by-value])
-                                    v   (-> last-op op-reads (get k) last)
-                                    v'  (first reads)
-                                    i   (get vo v)
-                                    i'  (get vo v')
-                                    delta (if (and i i')
-                                            (- i' i)
-                                            1)]
-                                [(when (< 1 delta)
-                                   ; We can show that this op skipped an index!
-                                   (let [voi (-> version-orders (get k)
-                                                 :by-index)
-                                         skipped (map voi (range (inc i) i'))]
-                                     {:type    :skip
-                                      :key     k
-                                      :delta   delta
-                                      :skipped skipped
-                                      :ops     [last-op op]}))
-                                 (when (< delta 1)
-                                   ; Aha, this wasn't monotonic!
-                                   {:type   :nonmonotonic
-                                    :key    k
-                                    :values [v v']
-                                    :delta  delta
-                                    :ops    [last-op op]})])
-                              ; First read of this key
-                              nil))
-                     errs (->> errs
-                               (mapcat identity)
-                               (remove nil?))
-                     ; Update our last-reads index for this op's read keys
-                     last-reads' (->> (keys reads)
-                                      (reduce (fn update-last-read [lr k]
-                                                (assoc lr k op))
-                                              last-reads))]
-                 (recur (next ops) (into errors errs) last-reads'))))))
-       ; Join together errors from all processes
-       (mapcat val)
-       (group-by :type)
+               (let [op    (first ops)]
+                 (case (:f op)
+                   ; When we assign or subscribe a new topic, preserve *only*
+                   ; those last-reads which we're still subscribing to.
+                   (:assign, :subscribe)
+                   (recur (next ops)
+                          errors
+                          (if (#{:invoke :fail} (:type op))
+                            last-reads
+                            (select-keys last-reads (:value op))))
+
+                   (:txn, :poll)
+                   (let [reads (op-reads op)
+                         ; Look at each key and values read by this op.
+                         errs (for [[k reads] reads]
+                                ; What was the last op that read this key?
+                                (if-let [last-op (get last-reads k)]
+                                  ; Compare the index of the last thing read by
+                                  ; the last op read to the index of our first
+                                  ; read
+                                  (let [vo  (get-in version-orders
+                                                    [k :by-value])
+                                        v   (-> last-op op-reads (get k) last)
+                                        v'  (first reads)
+                                        i   (get vo v)
+                                        i'  (get vo v')
+                                        delta (if (and i i')
+                                                (- i' i)
+                                                1)]
+                                    [(when (< 1 delta)
+                                       ; We can show that this op skipped an
+                                       ; index!
+                                       (let [voi (-> version-orders (get k)
+                                                     :by-index)
+                                             skipped (map voi
+                                                          (range (inc i) i'))]
+                                         {:type    :skip
+                                          :key     k
+                                          :delta   delta
+                                          :skipped skipped
+                                          :ops     [last-op op]}))
+                                     (when (< delta 1)
+                                       ; Aha, this wasn't monotonic!
+                                       {:type   :nonmonotonic
+                                        :key    k
+                                        :values [v v']
+                                        :delta  delta
+                                        :ops    [last-op op]})])
+                                  ; First read of this key
+                                  nil))
+                         errs (->> errs
+                                   (mapcat identity)
+                                   (remove nil?))
+                         ; Update our last-reads index for this op's read keys
+                         last-reads' (->> (keys reads)
+                                          (reduce (fn update-last-read [lr k]
+                                                    (assoc lr k op))
+                                                  last-reads))]
+                     (recur (next ops) (into errors errs) last-reads'))
+
+                   ; Some other :f
+                   (recur (next ops) errors last-reads)))))))
+           ; Join together errors from all processes
+           (mapcat val)
+           (group-by :type)
        (map-vals strip-types)))
 
 (defn nonmonotonic-send-cases
@@ -838,38 +859,53 @@
                ; Done
                errors
                ; Process this op
-               (let [op    (first ops)
-                     ; Look at each key and values sent by this op.
-                     sends (op-writes op)
-                     errs (for [[k sends] sends]
-                            ; What was the last op that sent to this key?
-                            (if-let [last-op (get last-sends k)]
-                              ; Compare the index of the last thing sent by the
-                              ; last op to the index of our first send
-                              (let [vo  (get-in version-orders [k :by-value])
-                                    v   (-> last-op op-writes (get k) last)
-                                    v'  (first sends)
-                                    i   (get vo v)
-                                    i'  (get vo v')
-                                    delta (if (and i i')
-                                            (- i' i)
-                                            1)]
-                                 (when (< delta 1)
-                                   ; Aha, this wasn't monotonic!
-                                   {:key    k
-                                    :values [v v']
-                                    :delta  (- i' i)
-                                    :ops    [last-op op]}))
-                              ; First send to this key
-                              nil))
-                     errs (->> errs
-                               (remove nil?))
-                     ; Update our last-reads index for this op's sent keys
-                     last-sends' (->> (keys sends)
-                                      (reduce (fn update-last-send [lr k]
-                                                (assoc lr k op))
-                                              last-sends))]
-                 (recur (next ops) (into errors errs) last-sends'))))))
+               (let [op (first ops)]
+                 (case (:f op)
+                   ; When we assign or subscribe a new topic, preserve *only*
+                   ; those last-reads which we're still subscribing to.
+                   (:assign, :subscribe)
+                   (recur (next ops)
+                          errors
+                          (if (#{:invoke :fail} (:type op))
+                            last-sends
+                            (select-keys last-sends (:value op))))
+
+                   (:send, :txn)
+                   (let [; Look at each key and values sent by this op.
+                         sends (op-writes op)
+                         errs (for [[k sends] sends]
+                                ; What was the last op that sent to this key?
+                                (if-let [last-op (get last-sends k)]
+                                  ; Compare the index of the last thing sent by
+                                  ; the last op to the index of our first send
+                                  (let [vo  (get-in version-orders
+                                                    [k :by-value])
+                                        v   (-> last-op op-writes (get k) last)
+                                        v'  (first sends)
+                                        i   (get vo v)
+                                        i'  (get vo v')
+                                        delta (if (and i i')
+                                                (- i' i)
+                                                1)]
+                                    (when (< delta 1)
+                                      ; Aha, this wasn't monotonic!
+                                      {:key    k
+                                       :values [v v']
+                                       :delta  (- i' i)
+                                       :ops    [last-op op]}))
+                                  ; First send to this key
+                                  nil))
+                         errs (->> errs
+                                   (remove nil?))
+                         ; Update our last-reads index for this op's sent keys
+                         last-sends' (->> (keys sends)
+                                          (reduce (fn update-last-send [lr k]
+                                                    (assoc lr k op))
+                                                  last-sends))]
+                     (recur (next ops) (into errors errs) last-sends'))
+
+                   ; Some other :f
+                   (recur (next ops) errors last-sends)))))))
        ; Join together errors from all processes
        (mapcat val)
        seq))
@@ -959,10 +995,7 @@
   (reify checker/Checker
     (check [this test history opts]
       (let [analysis (analysis history)
-            bad-errors (-> (:errors analysis)
-                           ; I think these might just be normal behavior when
-                           ; we call consumer.assign()
-                           (dissoc :poll-skip))]
+            bad-errors (-> (:errors analysis))]
         {:valid?          (empty? bad-errors)
          :errors          (:errors analysis)
          ;:version-orders  (->> (:version-orders analysis)

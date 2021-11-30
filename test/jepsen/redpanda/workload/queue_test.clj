@@ -48,19 +48,29 @@
         poll-7   {:process 0, :f :poll, :value [[:poll {:x [[7 :g]]}]]}
         ; Reads and writes that let us know offsets 3 and 5 existed
         poll-3   {:process 1, :f :poll, :value [[:poll {:x [[3 :c]]}]]}
-        write-6  {:process 2, :f :poll, :value [[:send :x [6 :f]]]}]
-    (is (= [{:key :x
-             :ops [poll-1-2 poll-4]
-             :delta 2
-             :skipped [:c]}
-            {:key :x
-             :ops [poll-4 poll-7]
-             :delta 2
-             :skipped [:f]}]
-           (-> [poll-1-2 poll-3 poll-4 write-6 poll-7]
-               analysis
-               :errors
-               :poll-skip)))))
+        write-6  {:process 2, :f :poll, :value [[:send :x [6 :f]]]}
+        errs [{:key :x
+               :ops [poll-1-2 poll-4]
+               :delta 2
+               :skipped [:c]}
+              {:key :x
+               :ops [poll-4 poll-7]
+               :delta 2
+               :skipped [:f]}]
+        nm (comp :poll-skip :errors analysis)]
+    (is (= errs (nm [poll-1-2 poll-3 poll-4 write-6 poll-7])))
+
+    ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
+    ; include :x, we allow skips.
+    (testing "with intermediate subscribe"
+      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
+            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
+            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
+            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
+        (is (nil? (nm [poll-1-2 poll-3 sub-y    poll-4 assign-y write-6 poll-7])))
+        ; But subscribes that still cover x, we preserve state
+        (is (= errs (nm [poll-1-2 poll-3 sub-xy poll-4
+                         assign-xy write-6 poll-7])))))))
 
 (deftest nonmonotonic-poll-test
   ; A nonmonotonic poll occurs when a single process performs two transactions,
@@ -73,12 +83,27 @@
                                                             [3 :c]]}]]}
         poll-234 {:process 0, :f :poll, :value [[:poll {:x [[2 :b]
                                                             [3 :c]
-                                                            [4 :d]]}]]}]
-    (is (= [{:key    :x
-             :ops    [poll-123 poll-234]
-             :values [:c :b]
-             :delta  -1}]
-           (-> [poll-123 poll-234] analysis :errors :nonmonotonic-poll)))))
+                                                            [4 :d]]}]]}
+        nm (comp :nonmonotonic-poll :errors analysis)
+        errs [{:key    :x
+               :ops    [poll-123 poll-234]
+               :values [:c :b]
+               :delta  -1}]]
+    (testing "together"
+      (is (= errs (nm [poll-123 poll-234]))))
+
+    ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
+    ; include :x, we allow nonmonotonicity.
+    (testing "with intermediate subscribe"
+      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
+            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
+            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
+            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
+        (is (nil? (nm [poll-123 sub-y poll-234])))
+        (is (nil? (nm [poll-123 assign-y poll-234])))
+        ; But subscribes that still cover x, we preserve state
+        (is (= errs (nm [poll-123 sub-xy poll-234])))
+        (is (= errs (nm [poll-123 assign-xy poll-234])))))))
 
 (deftest nonmonotonic-send-test
   ; A nonmonotonic send occurs when a single process performs two transactions
@@ -86,16 +111,29 @@
   ; ordered at or before t2's last send in the log.
   ;
   ; Here process 0 sends offsets 3, 4, then sends 1, 2
-  (let [send-34 {:process 0, :f :send, :value [[:send :x [3 :c]]
-                                               [:send :x [4 :d]]]}
-        send-12 {:process 0, :f :send, :value [[:send :x [1 :a]]
-                                               [:send :x [2 :b]]]}]
-    (is (= [{:key    :x
-             :values [:d :a]
-             :delta  -3
-             :ops    [send-34 send-12]}]
-            (-> [send-34 send-12] analysis :errors :nonmonotonic-send)))))
+  (let [send-34 {:type :info, :process 0, :f :send, :value [[:send :x [3 :c]]
+                                                            [:send :x [4 :d]]]}
+        send-12 {:type :ok, :process 0, :f :send, :value [[:send :x [1 :a]]
+                                                          [:send :x [2 :b]]]}
+        errs [{:key    :x
+               :values [:d :a]
+               :delta  -3
+               :ops    [send-34 send-12]}]
+        nm (comp :nonmonotonic-send :errors analysis)]
+    (is (= errs (nm [send-34 send-12])))
 
+    ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
+    ; include :x, we allow nonmonotonicity.
+    (testing "with intermediate subscribe"
+      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
+            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
+            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
+            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
+        (is (nil? (nm [send-34 sub-y    send-12])))
+        (is (nil? (nm [send-34 assign-y send-12])))
+        ; But subscribes that still cover x, we preserve state
+        (is (= errs (nm [send-34 sub-xy    send-12])))
+        (is (= errs (nm [send-34 assign-xy send-12])))))))
 
 (deftest int-poll-skip-test
   ; An *internal poll skip* occurs when within the scope of a single
