@@ -20,7 +20,7 @@
 
 (def pid-file
   "Where do we store the redpanda pid?"
-  "/var/run/redpanda.pid")
+  "/var/lib/redpanda/data/pid.lock")
 
 (def log-file
   "Where do we send stdout/stderr logs?"
@@ -43,6 +43,8 @@
     (c/exec :curl :-1sLf "https://packages.vectorized.io/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh" | :sudo :-E :bash)
     (debian/install [:redpanda])
     ; We're going to manage daemons ourselves
+    (c/exec :systemctl :stop :redpanda)
+    (c/exec :systemctl :stop :wasm_engine)
     (c/exec :systemctl :disable :redpanda)
     (c/exec :systemctl :disable :wasm_engine)
     ))
@@ -124,13 +126,21 @@
     db/Process
     (start! [this test node]
       (c/su
-        (c/exec :touch log-file pid-file)
-        (c/exec :chown (str user ":" user) log-file pid-file))
+        ; Make sure log file is ready
+        (c/exec :touch log-file)
+        (c/exec :chown (str user ":" user) log-file)
+        ; Ensure it's not running
+        (try+ (let [pids (c/exec :pgrep :--list-full :redpanda)]
+                (throw+ {:type :redpanda-running
+                         :pids pids}))
+              (catch [:type :jepsen.control/nonzero-exit, :exit 1] _)))
+      ; Start!
       (c/sudo user
               (cu/start-daemon!
                 {:chdir "/"
                  :logfile log-file
-                 :pidfile pid-file}
+                 :pidfile pid-file
+                 :make-pidfile? false}
                 "/usr/bin/redpanda"
                 :--redpanda-cfg config-file)))
 
