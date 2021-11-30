@@ -14,6 +14,22 @@
   "What user do we run RPK commands as?"
   "redpanda")
 
+(def data-dir
+  "Where does Redpanda data live?"
+  "/var/lib/redpanda/data")
+
+(def pid-file
+  "Where do we store the redpanda pid?"
+  "/var/run/redpanda.pid")
+
+(def log-file
+  "Where do we send stdout/stderr logs?"
+  "/var/log/redpanda.log")
+
+(def config-file
+  "Where does the redpanda config file live?"
+  "/etc/redpanda/redpanda.yaml")
+
 (defn rpk!
   "Runs an RPK command, just like c/exec."
   [& args]
@@ -26,8 +42,9 @@
   (c/su
     (c/exec :curl :-1sLf "https://packages.vectorized.io/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh" | :sudo :-E :bash)
     (debian/install [:redpanda])
-    ;(c/exec :systemctl :disable :redpanda)
-    ;(c/exec :systemctl :disable :wasm_engine)
+    ; We're going to manage daemons ourselves
+    (c/exec :systemctl :disable :redpanda)
+    (c/exec :systemctl :disable :wasm_engine)
     ))
 
 (defn node-id
@@ -95,37 +112,31 @@
     (teardown! [this test node]
       (db/kill! this test node)
       (c/su
-        (c/exec :rm :-rf (c/lit "/var/lib/redpanda/data/*"))))
+        (c/exec :rm :-rf
+                pid-file
+                log-file
+                (c/lit (str data-dir "/*")))))
 
     db/LogFiles
     (log-files [this test node]
-      [])
+      [log-file])
 
     db/Process
     (start! [this test node]
       (c/su
-        (try+
-          (c/exec :systemctl :start :redpanda)
-          (catch [:type :jepsen.control/nonzero-exit, :exit 1] e
-            (if (re-find #"control process exited with error code" (:err e))
-              ; Let's check the journal to provide a more informative error msg
-              (let [log (c/exec :journalctl :-u :redpanda | :tail :-n 12)]
-                (throw+ {:type ::startup-crash
-                         :log  log}
-                        (str "Redpanda crashed on startup:\n\n"
-                             log)))
-              ; Nothing we can do here
-              (throw+ e))))))
+        (c/exec :touch log-file pid-file)
+        (c/exec :chown (str user ":" user) log-file pid-file))
+      (c/sudo user
+              (cu/start-daemon!
+                {:chdir "/"
+                 :logfile log-file
+                 :pidfile pid-file}
+                "/usr/bin/redpanda"
+                :--redpanda-cfg config-file)))
 
     (kill! [this test node]
       (c/su
-        (cu/grepkill! :redpanda)
-        (try+
-          (c/exec :systemctl :stop :redpanda)
-          :killed
-          (catch [:type :jepsen.control/nonzero-exit, :exit 5] e
-            ; Unit not loaded
-            :not-installed))))
+        (cu/stop-daemon! :redpanda pid-file)))
 
     db/Pause
     (pause! [this test node]
