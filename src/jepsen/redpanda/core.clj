@@ -65,11 +65,12 @@
   "New logging levels for various Kafka packages--otherwise this test is going
   to be NOISY"
   {; This complains about invalid topics during partitions, too
-   "org.apache.kafka.clients.Metadata"                               :error
+   "org.apache.kafka.clients.Metadata"                               :fatal
    ; This is going to give us all kinds of NOT_CONTROLLER or
    ; UNKNOWN_SERVER_ERROR messages during partitions
    "org.apache.kafka.clients.NetworkClient"                          :error
    "org.apache.kafka.clients.admin.AdminClientConfig"                :warn
+   "org.apache.kafka.clients.admin.internals.AdminMetadataManager"   :warn
    "org.apache.kafka.clients.consumer.ConsumerConfig"                :warn
    "org.apache.kafka.clients.consumer.internals.ConsumerCoordinator" :warn
    ; This is also going to kvetch about unknown topic/partitions when listing
