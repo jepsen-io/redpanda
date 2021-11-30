@@ -130,10 +130,11 @@
         (c/exec :touch log-file)
         (c/exec :chown (str user ":" user) log-file)
         ; Ensure it's not running
-        (try+ (let [pids (c/exec :pgrep :--list-full :redpanda)]
-                (throw+ {:type :redpanda-running
-                         :pids pids}))
-              (catch [:type :jepsen.control/nonzero-exit, :exit 1] _)))
+        ;(try+ (let [pids (c/exec :pgrep :--list-full :redpanda)]
+        ;        (throw+ {:type :already-running
+        ;                 :pids pids}))
+        ;      (catch [:type :jepsen.control/nonzero-exit, :exit 1] _)))
+        )
       ; Start!
       (c/sudo user
               (cu/start-daemon!

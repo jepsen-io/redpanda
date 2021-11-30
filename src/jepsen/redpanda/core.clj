@@ -70,6 +70,7 @@
    ; UNKNOWN_SERVER_ERROR messages during partitions
    "org.apache.kafka.clients.NetworkClient"                          :error
    "org.apache.kafka.clients.admin.AdminClientConfig"                :warn
+   "org.apache.kafka.clients.admin.KafkaAdminClient"                 :warn
    "org.apache.kafka.clients.admin.internals.AdminMetadataManager"   :warn
    "org.apache.kafka.clients.consumer.ConsumerConfig"                :warn
    "org.apache.kafka.clients.consumer.internals.ConsumerCoordinator" :warn
