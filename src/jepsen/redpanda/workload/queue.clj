@@ -298,6 +298,9 @@
           (catch InvalidTopicException _
             (assoc op :type mop-fail-type, :error :invalid-topic))
 
+          (catch org.apache.kafka.common.errors.NetworkException e
+            (assoc op :type :info, :error [:network (.getMessage e)]))
+
           (catch NotLeaderOrFollowerException _
             (assoc op :type mop-fail-type, :error :not-leader-or-follower))
 
