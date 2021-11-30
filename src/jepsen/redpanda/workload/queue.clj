@@ -139,6 +139,7 @@
            (org.apache.kafka.common.errors DisconnectException
                                            InvalidTopicException
                                            NetworkException
+                                           NotControllerException
                                            NotLeaderOrFollowerException
                                            TimeoutException
                                            UnknownTopicOrPartitionException
@@ -305,6 +306,9 @@
 
           (catch NetworkException e
             (assoc op :type :info, :error [:network (.getMessage e)]))
+
+          (catch NotControllerException e
+            (assoc op :type mop-fail-type, :error :not-controller))
 
           (catch NotLeaderOrFollowerException _
             (assoc op :type mop-fail-type, :error :not-leader-or-follower))
