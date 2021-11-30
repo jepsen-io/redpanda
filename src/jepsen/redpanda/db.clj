@@ -119,9 +119,19 @@
 
     (kill! [this test node]
       (c/su
+        (cu/grepkill! :redpanda)
         (try+
           (c/exec :systemctl :stop :redpanda)
           :killed
           (catch [:type :jepsen.control/nonzero-exit, :exit 5] e
             ; Unit not loaded
-            :not-installed))))))
+            :not-installed))))
+
+    db/Pause
+    (pause! [this test node]
+      (c/su
+        (cu/grepkill! :stop :redpanda)))
+
+    (resume! [this test node]
+      (c/su
+        (cu/grepkill! :cont :redpanda)))))
