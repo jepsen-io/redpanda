@@ -136,7 +136,9 @@
            (org.apache.kafka.clients.producer KafkaProducer
                                               RecordMetadata)
            (org.apache.kafka.common TopicPartition)
-           (org.apache.kafka.common.errors InvalidTopicException
+           (org.apache.kafka.common.errors DisconnectException
+                                           InvalidTopicException
+                                           NetworkException
                                            NotLeaderOrFollowerException
                                            TimeoutException
                                            UnknownTopicOrPartitionException
@@ -295,10 +297,13 @@
               ;(.commitTransaction producer)
               ;(.abortTransaction producer)
               (assoc op :type :ok, :value txn')))
+          (catch DisconnectException e
+            (assoc op :type :info, :error [:disconnect (.getMessage e)]))
+
           (catch InvalidTopicException _
             (assoc op :type mop-fail-type, :error :invalid-topic))
 
-          (catch org.apache.kafka.common.errors.NetworkException e
+          (catch NetworkException e
             (assoc op :type :info, :error [:network (.getMessage e)]))
 
           (catch NotLeaderOrFollowerException _
