@@ -104,34 +104,19 @@
            ;"org.apache.kafka.common.serialization.StringSerializer"
            "org.apache.kafka.common.serialization.LongSerializer"
 
-           ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG
-           10000
-
+           ProducerConfig/DELIVERY_TIMEOUT_MS_CONFIG 10000
            ; We choose this lower than DELIVERY_TIMEOUT_MS so that we have a
            ; chance to retry
-           ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG
-           3000
-
-           ProducerConfig/MAX_BLOCK_MS_CONFIG
-           10000
-
+           ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG 3000
+           ProducerConfig/MAX_BLOCK_MS_CONFIG 10000
            ; Client complains `The configuration 'transaction.timeout.ms' was
            ; supplied but isn't a known config`; not sure what's up with that
            ; ProducerConfig/TRANSACTION_TIMEOUT_CONFIG
            ; 10000
-
            ; We want rapid reconnects so we can observe broken-ness
-           ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG
-           1000
-
-           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
-           500
-
-           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
-           1000
-
-           ; TODO?
-           ; ???
+           ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG 1000
+           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG 500
+           ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG 1000
            }
     (not= nil (:acks opts))
     (assoc ProducerConfig/ACKS_CONFIG (:acks opts))
@@ -149,8 +134,14 @@
   "Constructs a config map for an admin client connected to the given node."
   [node]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/admin/AdminClientConfig.html
-  {AdminClientConfig/BOOTSTRAP_SERVERS_CONFIG
-   (str node ":" port)})
+  {AdminClientConfig/BOOTSTRAP_SERVERS_CONFIG       (str node ":" port)
+   AdminClientConfig/DEFAULT_API_TIMEOUT_MS_CONFIG                 3000
+   AdminClientConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG               1000
+   AdminClientConfig/REQUEST_TIMEOUT_MS_CONFIG                     3000
+   AdminClientConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG     500
+   AdminClientConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG 1000
+   ; Never retry
+   AdminClientConfig/RETRIES_CONFIG                                0})
 
 (defn consumer
   "Opens a new consumer for the given node."
