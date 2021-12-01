@@ -20,7 +20,7 @@
 
 (def nemeses
   "The types of faults our nemesis can produce"
-  #{:pause :kill :partition :clock})
+  #{:pause :kill :partition :clock :membership})
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults"

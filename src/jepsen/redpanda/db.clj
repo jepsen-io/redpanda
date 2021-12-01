@@ -1,10 +1,13 @@
 (ns jepsen.redpanda.db
   "Database automation: setup, teardown, some node-related nemesis operations."
-  (:require [clojure.tools.logging :refer [info warn]]
+  (:require [clj-antlr.core :as antlr]
+            [clojure [string :as str]]
+            [clojure.tools.logging :refer [info warn]]
+            [dom-top.core :refer [assert+]]
             [jepsen [control :as c :refer [|]]
                     [core :as jepsen]
                     [db :as db]
-                    [util :as util :refer [pprint-str meh]]]
+                    [util :as util :refer [parse-long pprint-str meh]]]
             [jepsen.control [net :as cn]
                             [util :as cu]]
             [jepsen.os.debian :as debian]
@@ -61,15 +64,23 @@
     i))
 
 (defn configure!
-  "Sets up the local node's config"
-  [test node]
+  "Sets up the local node's config. Pass initial? true when first bootstrapping
+  the cluster."
+  ([test node]
+   (configure! test node false))
+  ([test node initial?]
   (c/su
     (let [id (node-id test node)]
       (rpk! :config :bootstrap
             :--id     id
             :--self   (cn/local-ip)
-            (when-not (zero? id)
-              [:--ips (cn/ip (first (:nodes test)))])))))
+            ; On the initial run, the 0th node has an empty ips list and all
+            ; other nodes join it. On subsequent runs, we join to every ip.
+            (when-not (and initial? (zero? id))
+              [:--ips (->> (:nodes test)
+                           (remove #{node})
+                           (map cn/ip)
+                           (str/join ","))]))))))
 
 (defn check-topic-creation
   "Checks that you can create a topic."
@@ -88,7 +99,8 @@
   "Waits until you can create a topic."
   []
   (util/await-fn check-topic-creation
-                 {:log-message "Waiting for topic creation"}))
+                 {:log-interval 10
+                  :log-message  "Waiting for topic creation"}))
 
 (defn db
   "Constructs a Jepsen database object which knows how to set up and tear down
@@ -97,7 +109,7 @@
   (reify db/DB
     (setup! [this test node]
       (install!)
-      (configure! test node)
+      (configure! test node true)
 
       ; Start primary
       (when (zero? (node-id test node))
@@ -157,3 +169,116 @@
     (resume! [this test node]
       (c/su
         (cu/grepkill! :cont :redpanda)))))
+
+;; Cluster ops
+
+(defn lowercase
+  "Converts a string to lowercase."
+  [^String s]
+  (.toLowerCase s))
+
+(defn part-str
+  "Takes a string s and a seq of column widths. Returns a seq of substrings
+  of s, each corresponding to one of those columns, plus one final column of
+  unbounded width."
+  ([s widths]
+   (part-str s 0 widths []))
+  ([s offset widths columns]
+   (if-not (seq widths)
+     ; Last column
+     (conj columns (subs s offset))
+     ; Intermediate column
+     (let [[width & widths'] widths
+           offset' (+ offset width)]
+       (recur s offset' widths' (conj columns (subs s offset offset')))))))
+
+(defn parse-header
+  "Takes a string of whitespace-separated names and returns a seq of {:name
+  :width} maps describing those columns. Names are lowercased keywords."
+  ([s]
+   (->> (re-seq #"[^\s]+\s*" s)
+        (map (fn [^String column]
+               {:name  (-> column str/trimr lowercase keyword)
+                :width (.length column)})))))
+
+(defn parse-tables
+  "Parses a table structure like
+
+      BROKERS
+      =======
+      ID    HOST             PORT
+      0*    192.168.122.101  9092
+      1     192.168.122.102  9092
+      2     192.168.122.103  9092
+
+      TOPICS
+      ======
+      NAME  PARTITIONS  REPLICAS
+      t4    2           3
+
+  Into a map like {:brokers [{:id \"0*\" :host \"192...\" ...} ...] ...}"
+  [s]
+  (loop [lines          (str/split s #"\n") ; Unconsumed lines
+         section        nil      ; What section are we in?
+         expect         :section ; What do we expect next?
+         column-names   []       ; A seq of names for each column
+         column-widths  []       ; A seq of how many characters wide each col is
+         data           {}]      ; A map of sections to vectors of rows,
+                                 ; each row a map of column names to strings
+    (if-not (seq lines)
+      data
+      (let [[line & lines'] lines]
+        (case expect
+          :divider
+          (do (assert+ (re-find #"^=+$" line)
+                       {:type ::parse-error
+                        :expected "A divider like ==="
+                        :actual   line})
+              (recur lines' section :header column-names column-widths data))
+
+          :header
+          (let [header (parse-header line)]
+            (recur lines' section :row-or-blank
+                   (mapv :name header)
+                   (butlast (map :width header))
+                   data))
+
+          :row-or-blank
+          (condp re-find line
+            ; Blank
+            #"^$"   (recur lines' nil :section [] [] data)
+            ; Row
+            (let [row (->> (part-str line column-widths)
+                           (map str/trimr)
+                           (zipmap column-names))
+                  rows  (get data section [])
+                  rows' (conj rows row)
+                  data' (assoc data section rows')]
+              (recur lines' section expect column-names column-widths data')))
+
+          :section
+          (recur lines' (-> line lowercase keyword) :divider [] [] data))))))
+
+(defn parse-cluster-info
+  "Parses a cluster info string."
+  [s]
+  (-> (parse-tables s)
+      (update :brokers
+              (partial map
+                       (fn [broker]
+                         (let [[_ id star] (re-find #"(\d+)(\*)?" (:id broker))]
+                           (-> broker
+                               (assoc :id (parse-long id))
+                               (cond-> star (assoc :star? true))
+                               (update :port parse-long))))))
+      (update :topics
+              (partial map
+                       (fn [topic]
+                         (-> topic
+                             (update :partitions parse-long)
+                             (update :replicas parse-long)))))))
+
+(defn cluster-info
+  "Returns cluster info from the current node as a clojure structure."
+  []
+  (parse-cluster-info (rpk! :cluster :info)))
