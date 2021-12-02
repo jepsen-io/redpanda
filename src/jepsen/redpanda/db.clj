@@ -1,6 +1,7 @@
 (ns jepsen.redpanda.db
   "Database automation: setup, teardown, some node-related nemesis operations."
-  (:require [clj-antlr.core :as antlr]
+  (:require [cheshire.core :as json]
+            [clj-http.client :as http]
             [clojure [string :as str]]
             [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+]]
@@ -32,6 +33,10 @@
 (def config-file
   "Where does the redpanda config file live?"
   "/etc/redpanda/redpanda.yaml")
+
+(def enabled-file
+  "A file we use to tell whether redpanda is able to start or not."
+  "/etc/redpanda/jepsen-enabled")
 
 (defn rpk!
   "Runs an RPK command, just like c/exec."
@@ -102,6 +107,33 @@
                  {:log-interval 10
                   :log-message  "Waiting for topic creation"}))
 
+(defn disable!
+  "Disables starting redpanda on the current node."
+  []
+  (c/su (c/exec :rm :-f enabled-file)))
+
+(defn enable!
+  "Enables starting redpanda on the current node."
+  []
+  (c/su (c/exec :touch enabled-file)))
+
+(defn enabled?
+  "Can we start redpanda on this node?"
+  []
+  (cu/exists? enabled-file))
+
+(defn nuke!
+  "Kills the process, wipes data files, and makes it impossible to start this
+  node. Leaves the log intact."
+  [test node]
+  (info "Nuking" node)
+  (disable!)
+  (db/kill! (:db test) test node)
+  (c/su
+    (c/exec :rm :-rf
+            pid-file
+            (c/lit (str data-dir "/*")))))
+
 (defn db
   "Constructs a Jepsen database object which knows how to set up and tear down
   a Redpanda cluster."
@@ -109,7 +141,13 @@
   (reify db/DB
     (setup! [this test node]
       (install!)
+      (enable!)
       (configure! test node true)
+
+      (c/su
+        ; Make sure log file is ready
+        (c/exec :touch log-file)
+        (c/exec :chown (str user ":" user) log-file))
 
       ; Start primary
       (when (zero? (node-id test node))
@@ -124,12 +162,9 @@
       (await-topic-creation))
 
     (teardown! [this test node]
-      (db/kill! this test node)
+      (nuke! test node)
       (c/su
-        (c/exec :rm :-rf
-                pid-file
-                log-file
-                (c/lit (str data-dir "/*")))))
+        (c/exec :rm :-f log-file)))
 
     db/LogFiles
     (log-files [this test node]
@@ -137,25 +172,16 @@
 
     db/Process
     (start! [this test node]
-      (c/su
-        ; Make sure log file is ready
-        (c/exec :touch log-file)
-        (c/exec :chown (str user ":" user) log-file)
-        ; Ensure it's not running
-        ;(try+ (let [pids (c/exec :pgrep :--list-full :redpanda)]
-        ;        (throw+ {:type :already-running
-        ;                 :pids pids}))
-        ;      (catch [:type :jepsen.control/nonzero-exit, :exit 1] _)))
-        )
-      ; Start!
-      (c/sudo user
-              (cu/start-daemon!
-                {:chdir "/"
-                 :logfile log-file
-                 :pidfile pid-file
-                 :make-pidfile? false}
-                "/usr/bin/redpanda"
-                :--redpanda-cfg config-file)))
+      (if-not (enabled?)
+        :disabled
+        (c/sudo user
+                (cu/start-daemon!
+                  {:chdir "/"
+                   :logfile log-file
+                   :pidfile pid-file
+                   :make-pidfile? false}
+                  "/usr/bin/redpanda"
+                  :--redpanda-cfg config-file))))
 
     (kill! [this test node]
       (c/su
@@ -279,6 +305,21 @@
                              (update :replicas parse-long)))))))
 
 (defn cluster-info
-  "Returns cluster info from the current node as a clojure structure."
+  "Returns cluster info from the current node as a clojure structure, by
+  shelling out to rpk. Returns nil if node is unavailable."
   []
-  (parse-cluster-info (rpk! :cluster :info)))
+  (try+
+    (parse-cluster-info (rpk! :cluster :info))
+    (catch [:type :jepsen.control/nonzero-exit, :exit 1] e
+      nil)))
+
+(defn decommission!
+  "Asks a node `via` to decommission a node id `target`"
+  [via target]
+  (try+
+    (-> (http/put (str "http://" via ":9644/v1/brokers/" target "/decommission")
+                  {:as :json})
+        :body)
+    (catch [:status 400] e
+      ; Try parsing message as data structure
+      (throw+ (update e :body json/parse-string true)))))

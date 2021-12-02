@@ -14,8 +14,8 @@
             [slingshot.slingshot :refer [try+ throw+]]))
 
 (def min-cluster-size
-  "How small do we allow clusters to become?"
-  1)
+  "How small do we allow clusters to become? I think 1 breaks Raft maybe?"
+  3)
 
 (def ip->node-cache
   "A map of IP addresses to node names. Lazily built on first use."
@@ -58,6 +58,18 @@
        (filter (comp states val))
        (mapv key)))
 
+(defn known-to-active-majority?
+  "Is a given node ID known to a majority of nodes in the :active state? Argh,
+  this is such a race-condition-prone hack, but... hopefully it'll work
+  sometimes?"
+  [{:keys [node-views nodes]} id]
+  (let [active (nodes-in-states #{:active} nodes)
+        known (->> active
+                   (keep (fn [node]
+                           (->> (get node-views node)
+                                (find-by :id id)))))]
+    (< 1/2 (/ (count known) (count active)))))
+
 (defn remove-node-op
   "We can remove a node from a cluster if it's in the view, and removing it
   wouldn't bring us below the minimum cluster size."
@@ -65,7 +77,10 @@
   (let [; What nodes, if we were to issue a remove command for them, would
         ; leave the cluster?
         active-set (set (nodes-in-states #{:active :adding} nodes))]
-    ; What nodes *could* we try to remove?
+    ; What nodes *could* we try to remove? Note that it's important that we try
+    ; to re-remove nodes which are already removing, because the request to
+    ; remove that node might have crashed in an indeterminate way, resulting in
+    ; a remove which would never actually complete unless we retry.
     (->> (nodes-in-states #{:adding :active :removing} nodes)
          (keep (fn [node]
                  (let [;ip (node->ip test node)
@@ -83,6 +98,27 @@
          vec
          rand-nth-empty)))
 
+(defn free-node-op
+  "Nodes which have been removed can be freed, killing the process, deleting
+  their data files, and marking them for possible re-entry to the cluster."
+  [test {:keys [nodes]}]
+  (->> (nodes-in-states #{:removed} nodes)
+       (map (fn [node]
+              {:type  :info
+               :f     :free-node
+               :value node}))
+       rand-nth-empty))
+
+(defn add-node-op
+  "We can add any free node to the cluster."
+  [test {:keys [nodes]}]
+  (->> (nodes-in-states #{:free} nodes)
+       (map (fn [node]
+              {:type  :info
+               :f     :add-node
+               :value {:node node, :id (rdb/node-id test node)}}))
+       rand-nth-empty))
+
 (defrecord Membership
   [node-views ; A map of nodes to that node's local view of the cluster
    view       ; Our merged view of cluster state
@@ -92,7 +128,9 @@
               ;  :active   In the cluster
               ;  :adding   Joining the cluster but not yet complete
               ;  :removing Being removed from the cluster but not yet complete
-              ;  :free     Not in the cluster at all
+              ;  :removed  The cluster believes this node is gone, but we
+              ;            haven't killed it and wiped its data files yet
+              ;  :free     Not in the cluster at all; blank slate
    ]
 
   membership/State
@@ -103,11 +141,14 @@
   (node-view [this test node]
     (->> (c/on-nodes test [node]
                      (fn fetch-node-view [test node]
-                       (->> (rdb/cluster-info)
-                            :brokers
-                            (mapv (fn xform-broker [broker]
-                                    {:node (ip->node test (:host broker))
-                                     :id   (:id broker)})))))
+                       (if-not (rdb/enabled?)
+                         [] ; Not a part of the cluster
+                         (when-let [info (rdb/cluster-info)]
+                           (->> info
+                                :brokers
+                                (mapv (fn xform-broker [broker]
+                                        {:node (ip->node test (:host broker))
+                                         :id   (:id broker)})))))))
          first
          val))
 
@@ -121,26 +162,110 @@
          (mapv first)))
 
   (fs [this]
-    #{:add-node :remove-node})
+    #{:add-node
+      :free-node
+      :remove-node})
 
   (op [this test]
-    (or (->> [(remove-node-op test this)]
+    (or (->> [(free-node-op   test this)
+              (add-node-op    test this)
+              (remove-node-op test this)]
              (remove nil?)
              rand-nth-empty)
         :pending))
 
   (invoke! [this test {:keys [f value] :as op}]
     (case f
-      op))
+      :add-node
+      (try+
+        (let [this'  (update this :nodes assoc (:node value) :adding)
+              {:keys [id node]} value]
+          [(-> (c/on-nodes test [node]
+                          (fn [test node]
+                            (rdb/configure! test node)
+                            (rdb/enable!)
+                            (assoc-in op [:value :result]
+                                      (db/start! (:db test) test node))))
+              vals
+              first)
+           this']))
+
+      :free-node
+      (let [node value]
+        (c/on-nodes test [node] rdb/nuke!)
+        [(assoc op :done? true)
+         (update this :nodes assoc node :free)])
+
+      :remove-node
+      ; First, flag this node as being in state removing
+      (let [this' (update this :nodes assoc (:node value) :removing)]
+        ; Then try to actually remove it
+        (try+
+          (rdb/decommission! (:via value) (:id value))
+          [(update op :value assoc :ok? true) this']
+          (catch [:status 400] e
+            ; When our request is rejected, we know the node isn't being
+            ; removed and leave it in the original state.
+            [(assoc op :error [400 (-> e :body)]) this])
+          (catch [:status 500] e
+            ; This could go either way, so we flag the node as :removing just
+            ; in case.
+            [(assoc op :error [500 (-> e :body)]) this'])
+          (catch java.net.ConnectException e
+           ; Can't have happened
+           [(assoc op :error [:connect-exception]) this])))))
 
   (resolve [this test]
-    this)
+    (reduce
+      (fn resolve-op [state [{:keys [f value] :as op} op' :as pair]]
+        (case f
+          ; Once an adding node is known to an active majority, we consider it
+          ; active, and mark its add op as resolved.
+          :add-node
+          (if-not (known-to-active-majority? this (:id value))
+            ; Still waiting
+            this
+            ; Accepted!
+            (let [node (:node value)]
+              (-> this
+                  (update :nodes assoc node :active)
+                  (update :pending disj pair))))
 
-  (resolve-op [this test [op op']]
-    this)
+          ; Free always completes synchronously
+          :free-node
+          (update this :pending disj pair)
 
-  (teardown! [this test]
-    ))
+          :remove-node
+          (cond ; Definitely didn't happen; we're done here.
+                (= 400 (first (:error op')))
+                (update this :pending disj pair)
+
+                ; OK, this op might have or definitely did take place. But if a
+                ; majority of active nodes still think it's in the cluster,
+                ; we'll wait.
+                (known-to-active-majority? this (:id (:value op)))
+                this
+
+                ; Mostly forgotten--let's call this done!
+                :else
+                (let [node (:node (:value op))]
+                  ; Go ahead and wipe the config and data files, and disable the
+                  ; node, so if we restart it won't rejoin.
+                  ; And now this op is resolved.
+                  (-> this
+                      (update :nodes assoc node :removed)
+                      (update :pending disj pair))))
+
+          ; Dunno how to resolve this :f
+          nil
+          this))
+      this
+      pending))
+
+  ; Unused; we implement resolve manually.
+  (resolve-op [this test pair])
+
+  (teardown! [this test]))
 
 (defn membership-package
   "A nemesis package which can perform membership changes."
@@ -153,7 +278,7 @@
                           :log-view? true})
       membership/package
       (assoc :perf #{{:name "member"
-                      :fs   #{:add-node :remove-node :stake}
+                      :fs   #{:add-node :free-node :remove-node}
                       :color "#A66AD8"}})))
 
 (defn package
