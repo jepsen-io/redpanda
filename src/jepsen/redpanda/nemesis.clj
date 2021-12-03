@@ -217,52 +217,61 @@
             [(assoc op :error (:body e)) this'])
           (catch java.net.ConnectException e
            ; Can't have happened
-           [(assoc op :error [:connect-exception]) this])))))
+           [(assoc op :error {:type :connect-exception}) this])))))
 
   (resolve [this test]
     (reduce
       (fn resolve-op [this [{:keys [f value] :as op} op' :as pair]]
-        (case f
-          ; Once an adding node is known to an active majority, we consider it
-          ; active, and mark its add op as resolved.
-          :add-node
-          (if-not (known-to-active-majority? this (:id (:value op')))
-            ; Still waiting
-            this
-            ; Accepted!
-            (let [node (:node value)]
-              (-> this
-                  (update :nodes assoc node :active)
-                  (update :pending disj pair))))
+        (cond ; It's possible to add and remove a node in rapid succession,
+              ; such that the add op remains pending because we never got a
+              ; chance to see it. Once a node is free, we clear all pending ops
+              ; associated with that node, regardless of instance.
+              (= :free (get (:nodes this) (:node (:value op))))
+              (update this :pending disj pair)
 
-          ; Free always completes synchronously
-          :free-node
-          (update this :pending disj pair)
+              true
+              (case f
+                ; Once an adding node is known to an active majority, we
+                ; consider it active, and mark its add op as resolved.
+                :add-node
+                (if-not (known-to-active-majority? this (:id (:value op')))
+                  ; Still waiting
+                  this
+                  ; Accepted!
+                  (let [node (:node value)]
+                    (-> this
+                        (update :nodes assoc node :active)
+                        (update :pending disj pair))))
 
-          :remove-node
-          (cond ; Definitely didn't happen; we're done here.
-                (= 400 (:code (:error op')))
+                ; Free always completes synchronously
+                :free-node
                 (update this :pending disj pair)
 
-                ; OK, this op might have or definitely did take place. But if a
-                ; majority of active nodes still think it's in the cluster,
-                ; we'll wait.
-                (known-to-active-majority? this (:id (:value op)))
-                this
+                :remove-node
+                (cond ; Definitely didn't happen; we're done here.
+                      (= 400 (:code (:error op')))
+                      (update this :pending disj pair)
 
-                ; Mostly forgotten--let's call this done!
-                :else
-                (let [node (:node (:value op))]
-                  ; Go ahead and wipe the config and data files, and disable the
-                  ; node, so if we restart it won't rejoin.
-                  ; And now this op is resolved.
-                  (-> this
-                      (update :nodes assoc node :removed)
-                      (update :pending disj pair))))
+                      ; Likewise, can't have happened.
+                      (= :connect-exception (:type (:error op')))
+                      (update this :pending disj pair)
 
-          ; Dunno how to resolve this :f
-          nil
-          this))
+                      ; OK, this op might have or definitely did take place. But
+                      ; if a majority of active nodes still think it's in the
+                      ; cluster, we'll wait.
+                      (known-to-active-majority? this (:id (:value op)))
+                      this
+
+                      ; Mostly forgotten--let's call this done!
+                      :else
+                      (let [node (:node (:value op))]
+                        (-> this
+                            (update :nodes assoc node :removed)
+                            (update :pending disj pair))))
+
+                ; Dunno how to resolve this :f
+                nil
+                this)))
       this
       pending))
 
