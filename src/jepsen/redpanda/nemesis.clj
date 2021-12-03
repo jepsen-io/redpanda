@@ -116,7 +116,7 @@
        (map (fn [node]
               {:type  :info
                :f     :add-node
-               :value {:node node, :id (rdb/node-id test node)}}))
+               :value {:node node}}))
        rand-nth-empty))
 
 (defrecord Membership
@@ -153,11 +153,11 @@
          val))
 
   (merge-views [this test]
-    ; Straightforward merge by node, picking any representation of a node.
+    ; Straightforward merge by node id, picking any representation of a node.
     (->> node-views
          (mapcat (fn [[observer view]]
                    view))
-         (group-by :node)
+         (group-by :id)
          vals
          (mapv first)))
 
@@ -179,15 +179,19 @@
       :add-node
       (try+
         (let [this'  (update this :nodes assoc (:node value) :adding)
-              {:keys [id node]} value]
+              node   (:node value)
+              id     (rdb/gen-node-id! test node)]
           [(-> (c/on-nodes test [node]
-                          (fn [test node]
-                            (rdb/configure! test node)
-                            (rdb/enable!)
-                            (assoc-in op [:value :result]
-                                      (db/start! (:db test) test node))))
-              vals
-              first)
+                           (fn [test node]
+                             (rdb/configure! test node)
+                             (rdb/enable!)
+                             (assoc op :value
+                                    (assoc value
+                                           :id id
+                                           :result (db/start! (:db test)
+                                                              test node)))))
+               first
+               val)
            this']))
 
       :free-node
@@ -206,23 +210,23 @@
           (catch [:status 400] e
             ; When our request is rejected, we know the node isn't being
             ; removed and leave it in the original state.
-            [(assoc op :error [400 (-> e :body)]) this])
+            [(assoc op :error (:body e)) this])
           (catch [:status 500] e
             ; This could go either way, so we flag the node as :removing just
             ; in case.
-            [(assoc op :error [500 (-> e :body)]) this'])
+            [(assoc op :error (:body e)) this'])
           (catch java.net.ConnectException e
            ; Can't have happened
            [(assoc op :error [:connect-exception]) this])))))
 
   (resolve [this test]
     (reduce
-      (fn resolve-op [state [{:keys [f value] :as op} op' :as pair]]
+      (fn resolve-op [this [{:keys [f value] :as op} op' :as pair]]
         (case f
           ; Once an adding node is known to an active majority, we consider it
           ; active, and mark its add op as resolved.
           :add-node
-          (if-not (known-to-active-majority? this (:id value))
+          (if-not (known-to-active-majority? this (:id (:value op')))
             ; Still waiting
             this
             ; Accepted!
@@ -237,7 +241,7 @@
 
           :remove-node
           (cond ; Definitely didn't happen; we're done here.
-                (= 400 (first (:error op')))
+                (= 400 (:code (:error op')))
                 (update this :pending disj pair)
 
                 ; OK, this op might have or definitely did take place. But if a

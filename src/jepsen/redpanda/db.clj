@@ -57,16 +57,36 @@
     (c/exec :systemctl :disable :wasm_engine)
     ))
 
-(defn node-id
-  "Takes a test and a node name, and returns a numeric ID (e.g. 0, 1, ...) for
-  that node. The first node in the test is node 0, the root node."
+(defn gen-node-id!
+  "Generates a new node ID for a node, mutating the node-ids atom in the test's
+  DB. Returns that node ID. Node IDs are allocated so that all IDs for a given
+  node have the same (mod id node-count) value."
   [test node]
-  (let [i (.indexOf ^java.util.List (:nodes test) node)]
-    (when (neg? i)
-      (throw+ {:type ::node-not-in-cluster
-               :node node
-               :nodes (:nodes test)}))
-    i))
+  (-> test :db :node-ids
+      (swap! (fn [node-ids]
+               (let [id (or (when-let [id (get node-ids node)]
+                              (+ id (count (:nodes test))))
+                            (.indexOf ^java.util.List (:nodes test) node))]
+                 (when (neg? id)
+                   (throw+ {:type ::node-not-in-cluster
+                            :node node
+                            :nodes (:nodes test)}))
+                 (assoc node-ids node id))))
+      (get node)))
+
+(defn node-id->node
+  "Takes a test and a node ID and returns the node name that ID must have been
+  for."
+  [test node-id]
+  (let [nodes (:nodes test)]
+    (nth nodes (mod node-id (count nodes)))))
+
+(defn node-id
+  "Takes a test and a node name, and returns the current numeric ID (e.g. 0, 1,
+  ...) for that node. The first node in the test is initially node 0, the root
+  node."
+  [test node]
+  (-> test :db :node-ids deref (get node)))
 
 (defn configure!
   "Sets up the local node's config. Pass initial? true when first bootstrapping
@@ -134,67 +154,72 @@
             pid-file
             (c/lit (str data-dir "/*")))))
 
+(defrecord DB [node-ids]
+  db/DB
+  (setup! [this test node]
+    ; Generate an initial node ID
+    (info "Node ID" (gen-node-id! test node))
+    (install!)
+    (enable!)
+    (configure! test node true)
+
+    (c/su
+      ; Make sure log file is ready
+      (c/exec :touch log-file)
+      (c/exec :chown (str user ":" user) log-file))
+
+    ; Start primary
+    (when (zero? (node-id test node))
+      (db/start! this test node))
+    (jepsen/synchronize test)
+
+    ; Then secondaries
+    (when-not (zero? (node-id test node))
+      (db/start! this test node))
+
+    ; Wait for cluster to be ready.
+    (await-topic-creation))
+
+  (teardown! [this test node]
+    (nuke! test node)
+    (c/su
+      (c/exec :rm :-f log-file)))
+
+  db/LogFiles
+  (log-files [this test node]
+    [log-file])
+
+  db/Process
+  (start! [this test node]
+    (if-not (enabled?)
+      :disabled
+      (c/sudo user
+              (cu/start-daemon!
+                {:chdir "/"
+                 :logfile log-file
+                 :pidfile pid-file
+                 :make-pidfile? false}
+                "/usr/bin/redpanda"
+                :--redpanda-cfg config-file))))
+
+  (kill! [this test node]
+    (c/su
+      (cu/stop-daemon! :redpanda pid-file)))
+
+  db/Pause
+  (pause! [this test node]
+    (c/su
+      (cu/grepkill! :stop :redpanda)))
+
+  (resume! [this test node]
+    (c/su
+      (cu/grepkill! :cont :redpanda))))
+
 (defn db
   "Constructs a Jepsen database object which knows how to set up and tear down
   a Redpanda cluster."
   []
-  (reify db/DB
-    (setup! [this test node]
-      (install!)
-      (enable!)
-      (configure! test node true)
-
-      (c/su
-        ; Make sure log file is ready
-        (c/exec :touch log-file)
-        (c/exec :chown (str user ":" user) log-file))
-
-      ; Start primary
-      (when (zero? (node-id test node))
-        (db/start! this test node))
-      (jepsen/synchronize test)
-
-      ; Then secondaries
-      (when-not (zero? (node-id test node))
-        (db/start! this test node))
-
-      ; Wait for cluster to be ready.
-      (await-topic-creation))
-
-    (teardown! [this test node]
-      (nuke! test node)
-      (c/su
-        (c/exec :rm :-f log-file)))
-
-    db/LogFiles
-    (log-files [this test node]
-      [log-file])
-
-    db/Process
-    (start! [this test node]
-      (if-not (enabled?)
-        :disabled
-        (c/sudo user
-                (cu/start-daemon!
-                  {:chdir "/"
-                   :logfile log-file
-                   :pidfile pid-file
-                   :make-pidfile? false}
-                  "/usr/bin/redpanda"
-                  :--redpanda-cfg config-file))))
-
-    (kill! [this test node]
-      (c/su
-        (cu/stop-daemon! :redpanda pid-file)))
-
-    db/Pause
-    (pause! [this test node]
-      (c/su
-        (cu/grepkill! :stop :redpanda)))
-
-    (resume! [this test node]
-      (c/su
-        (cu/grepkill! :cont :redpanda)))))
+  (map->DB {:node-ids (atom {})}))
 
 ;; Cluster ops
 
@@ -313,6 +338,13 @@
     (catch [:type :jepsen.control/nonzero-exit, :exit 1] e
       nil)))
 
+(defn broker-state
+  "Fetches the broker state from the given node via HTTP."
+  [node]
+  (-> (http/get (str "http://" node ":9644/v1/brokers")
+                {:as :json})
+      :body))
+
 (defn decommission!
   "Asks a node `via` to decommission a node id `target`"
   [via target]
@@ -321,5 +353,8 @@
                   {:as :json})
         :body)
     (catch [:status 400] e
+      ; Try parsing message as data structure
+      (throw+ (update e :body json/parse-string true)))
+    (catch [:status 500] e
       ; Try parsing message as data structure
       (throw+ (update e :body json/parse-string true)))))

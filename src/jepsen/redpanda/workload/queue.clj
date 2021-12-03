@@ -138,6 +138,7 @@
            (org.apache.kafka.common TopicPartition)
            (org.apache.kafka.common.errors DisconnectException
                                            InvalidTopicException
+                                           InvalidReplicationFactorException
                                            NetworkException
                                            NotControllerException
                                            NotLeaderOrFollowerException
@@ -306,6 +307,9 @@
 
           (catch InvalidTopicException _
             (assoc op :type mop-fail-type, :error :invalid-topic))
+
+          (catch InvalidReplicationFactorException _
+            (assoc op :type mop-fail-type :error :invalid-replication-factor))
 
           (catch NetworkException e
             (assoc op :type :info, :error [:network (.getMessage e)]))
