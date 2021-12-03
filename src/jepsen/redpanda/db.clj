@@ -38,6 +38,10 @@
   "A file we use to tell whether redpanda is able to start or not."
   "/etc/redpanda/jepsen-enabled")
 
+(def nofile
+  "The ulimit number of files we apply to the redpanda process."
+  (long (Math/pow 2 20))) ; ~ 1 million
+
 (defn rpk!
   "Runs an RPK command, just like c/exec."
   [& args]
@@ -193,14 +197,23 @@
   (start! [this test node]
     (if-not (enabled?)
       :disabled
-      (c/sudo user
-              (cu/start-daemon!
-                {:chdir "/"
-                 :logfile log-file
-                 :pidfile pid-file
-                 :make-pidfile? false}
-                "/usr/bin/redpanda"
-                :--redpanda-cfg config-file))))
+      (do (c/sudo user
+                  (cu/start-daemon!
+                    {:chdir "/"
+                     :logfile log-file
+                     :pidfile pid-file
+                     :make-pidfile? false}
+                    "/usr/bin/redpanda"
+                    :--redpanda-cfg config-file))
+          ; Bump up filehandle limit
+          (c/su (let [pid (util/await-fn (partial c/exec :cat pid-file))]
+                  (try+
+                    (c/exec :prlimit (str "--nofile=" nofile) :--pid pid)
+                    (catch [:type :jepsen.control/nonzero-exit] e
+                      (if (re-find #"No such process" (:err e))
+                        (throw+ {:type :ulimit-failed})
+                        (throw+ e)))))))))
+
 
   (kill! [this test node]
     (c/su

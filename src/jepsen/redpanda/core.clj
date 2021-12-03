@@ -131,7 +131,7 @@
                           :perf       (checker/perf
                                         {:nemeses (:perf nemesis)})
                           :ex         (checker/unhandled-exceptions)
-                          :crash      (checker/log-file-pattern
+                          :assert     (checker/log-file-pattern
                                         #"\] assert -" "redpanda.log")
                           :workload   (:checker workload)})
             :perf-opts {:nemeses (:perf nemesis)}
