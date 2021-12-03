@@ -1020,6 +1020,7 @@
                    (assoc opts
                           ; TODO: don't hardcode these
                           :max-txn-length 1
+                          :max-writes-per-key 1024
                           :consistency-models [:strict-serializable]))]
     (-> workload
         (assoc :client  (client)
