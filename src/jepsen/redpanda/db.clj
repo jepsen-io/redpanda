@@ -351,11 +351,17 @@
     (catch [:type :jepsen.control/nonzero-exit, :exit 1] e
       nil)))
 
+(def common-http-opts
+  "Common options for HTTP requests."
+  {:socket-timeout     10000
+   :connection-timeout 1000
+   :as                 :json})
+
 (defn broker-state
   "Fetches the broker state from the given node via HTTP."
   [node]
   (-> (http/get (str "http://" node ":9644/v1/brokers")
-                {:as :json})
+                common-http-opts)
       :body))
 
 (defn decommission!
@@ -363,7 +369,7 @@
   [via target]
   (try+
     (-> (http/put (str "http://" via ":9644/v1/brokers/" target "/decommission")
-                  {:as :json})
+                  common-http-opts)
         :body)
     (catch [:status 400] e
       ; Try parsing message as data structure
