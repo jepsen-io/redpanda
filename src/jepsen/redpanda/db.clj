@@ -50,10 +50,10 @@
 
 (defn install!
   "Installs Redpanda on the local node."
-  []
+  [test]
   (c/su
     (c/exec :curl :-1sLf "https://packages.vectorized.io/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh" | :sudo :-E :bash)
-    (debian/install [:redpanda])
+    (debian/install {:redpanda (:version test)})
     ; We're going to manage daemons ourselves
     (c/exec :systemctl :stop :redpanda)
     (c/exec :systemctl :stop :wasm_engine)
@@ -163,7 +163,7 @@
   (setup! [this test node]
     ; Generate an initial node ID
     (info "Node ID" (gen-node-id! test node))
-    (install!)
+    (install! test)
     (enable!)
     (configure! test node true)
 

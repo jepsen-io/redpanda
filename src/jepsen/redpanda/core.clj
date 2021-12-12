@@ -90,6 +90,13 @@
    "org.apache.kafka.common.utils.AppInfoParser"                     :warn
    })
 
+(defn short-version
+  "Truncates a debian version string like 21.11.2-1-f58e69b6 to just 21.11.2"
+  [version]
+  (if-let [[m short] (re-find #"^([\d\.]+)-" version)]
+    short
+    version))
+
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
@@ -107,7 +114,8 @@
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
-           {:name      (str (name workload-name)
+           {:name      (str (short-version (:version opts))
+                            " " (name workload-name)
                             " "
                             (->> opts :sub-via (map name) sort (str/join ","))
                             (when-let [acks (:acks opts)] (str " acks=" acks))
@@ -203,6 +211,9 @@
     :parse-fn (comp set parse-comma-kws)
     :validate [#(every? #{:assign :subscribe} %)
                "Can only be assign and/or subscribe"]]
+
+   ["-v" "--version STRING" "What version of Redpanda should we install? See apt list --all-versions redpanda for a full list of available versions."
+    :default "21.10.1-1-e7b6714a"]
 
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword
