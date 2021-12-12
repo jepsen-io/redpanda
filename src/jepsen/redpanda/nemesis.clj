@@ -215,6 +215,9 @@
             ; This could go either way, so we flag the node as :removing just
             ; in case.
             [(assoc op :error (:body e)) this'])
+          (catch java.net.SocketTimeoutException e
+            ; Not sure if this happened or not
+            [(assoc op :error {:type :socket-timeout}) this'])
           (catch java.net.ConnectException e
            ; Can't have happened
            [(assoc op :error {:type :connect-exception}) this])))))
