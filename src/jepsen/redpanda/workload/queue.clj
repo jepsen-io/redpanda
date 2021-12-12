@@ -512,9 +512,11 @@
                    seq)
       :orders (map-vals (comp index-seq (partial keep first)) logs)})))
 
-(defn op-writes
-  "Returns a map of keys to the sequence of all values written in an op."
-  [op]
+(defn op-writes-helper
+  "Takes an operation and a function which takes an offset-value pair. Returns
+  a map of keys written by this operation to the sequence of (f [offset value])
+  sends for that key. Note that offset may be nil."
+  [op f]
   (when (#{:txn :send} (:f op))
     (reduce (fn [writes mop]
               (if (= :send (first mop))
@@ -522,29 +524,66 @@
                       vs (get writes k [])
                       ; Values can be either a literal value or a [offset value]
                       ; pair.
-                      value (if (vector? v) (second v) v)]
+                      value (if (vector? v)
+                              (f v)
+                              (f [nil v]))]
                   (assoc writes k (conj vs value)))
                 ; Something other than a send
                 writes))
             {}
             (:value op))))
 
-(defn op-reads
-  "Returns a map of keys to the sequence of all values read by an op for that
-  key."
+(defn op-writes
+  "Returns a map of keys to the sequence of all values written to that key in
+  an op."
   [op]
+  (op-writes-helper op second))
+
+(defn op-write-offsets
+  "Returns a map of keys to the sequence of all offsets written to that key in
+  an op."
+  [op]
+  (op-writes-helper op first))
+
+(defn op-write-pairs
+  "Returns a map of keys to the sequence of all [offset value] pairs written to
+  that key in an op."
+  [op]
+  (op-writes-helper op identity))
+
+(defn op-reads-helper
+  "Takes an operation and a function which takes an offset-value pair. Returns
+  a map of keys read by this operation to the sequence of (f [offset value])
+  read for that key."
+  [op f]
   (when (#{:txn :poll} (:f op))
-    (reduce (fn mop [writes mop]
+    (reduce (fn mop [res mop]
               (if (= :poll (first mop))
-                (reduce (fn per-key [writes [k pairs]]
-                          (let [vs  (get writes k [])
-                                vs' (into vs (map second pairs))]
-                            (assoc writes k vs')))
-                        writes
+                (reduce (fn per-key [res [k pairs]]
+                          (let [vs  (get res k [])
+                                vs' (into vs (map f pairs))]
+                            (assoc res k vs')))
+                        res
                         (second mop))
-                writes))
+                res))
             {}
             (:value op))))
+
+(defn op-read-pairs
+  "Returns a map of keys to the sequence of all [offset value] pairs read for
+  that key."
+  [op]
+  (op-reads-helper op identity))
+
+(defn op-read-offsets
+  "Returns a map of keys to the sequence of all offsets read for that key."
+  [op]
+  (op-reads-helper op first))
+
+(defn op-reads
+  "Returns a map of keys to the sequence of all values read for that key."
+  [op]
+  (op-reads-helper op second))
 
 (defn reads-of-key
   "Returns a seq of all operations which read the given key, and, optionally,
@@ -573,6 +612,22 @@
         (writes-of-key k)
         (filter (fn [op]
                   (some #{v} (get (op-writes op) k)))))))
+
+(defn reads-of-key-offset
+  "Returns a seq of all operations which read the given key and offset."
+  [k offset history]
+  (->> history
+       (reads-of-key k)
+       (filter (fn [op]
+                 (some #{offset} (get (op-read-offsets op) k))))))
+
+(defn writes-of-key-offset
+  "Returns a seq of all operations which wrote the given key and offset."
+  [k offset history]
+  (->> history
+       (writes-of-key k)
+       (filter (fn [op]
+                 (some #{offset} (get (op-write-offsets op) k))))))
 
 (defn writes-by-type
   "Takes a history and constructs a map of types (:ok, :info, :fail) to maps of
