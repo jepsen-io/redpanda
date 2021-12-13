@@ -6,18 +6,38 @@
             [jepsen [checker :as checker]]
             [jepsen.redpanda.workload.queue :refer :all]))
 
+(deftest log->last-index->values-test
+  (testing "empty"
+    (is (= [] (log->last-index->values []))))
+  (testing "standard"
+    (is (= [nil #{:a :b} nil #{:c} #{:d}]
+           (log->last-index->values
+             [nil #{:a} #{:a :b :c} nil #{:c} #{:c :d} #{:d}])))))
+
+(deftest log->value->first-index-test
+  (testing "empty"
+    (is (= {} (log->value->first-index []))))
+  (testing "standard"
+    (is (= {:a 0, :b 1, :c 1, :d 3}
+           (log->value->first-index
+             [nil #{:a} #{:a :b :c} nil #{:c} #{:c :d} #{:d}])))))
+
 (deftest version-orders-test
   ; Playing a little fast and loose here: when there's conflicts at an offset
   ; we choose a single value nondeterministically.
-  (is (= {:orders {:x {:by-index [:a :c :d]
-                       :by-value {:a 0, :c 1, :d 2}}}
+  (is (= {:orders {:x {:by-index   [:a :c :b :d]
+                       :by-value   {:a 0, :b 2, :c 1, :d 3}
+                       ; The raw log has a gap at offset 2.
+                       :log        [#{:a} #{:b :c} nil #{:b} #{:d}]}}
           ; The write of c at 1 conflicts with the read of b at 1
-          :errors [{:key :x, :offset 1, :values #{:b :c}}]}
+          :errors [{:key :x, :index 1, :offset 1, :values #{:b :c}}]}
+
          (version-orders
-           ; Read [a b]
+           ; Read [a b] at offset 0 and 1
            [{:type :ok, :f :txn, :value [[:poll {:x [[0 :a] [1 :b]]}]]}
-            ; But write c at offset 1, and d at offset 4
+            ; But write c at offset 1, b at offset 3, and d at offset 4
             {:type :info, :f :txn, :value [[:send :x [1 :c]]
+                                           [:send :x [3 :b]]
                                            [:send :x [4 :d]]]}]))))
 
 (deftest g1a-test
@@ -30,15 +50,30 @@
            (-> [send poll] analysis :errors :g1a)))))
 
 (deftest lost-update-test
-  ; We submit a at offset 0, b at offset 1, and d at offset 3. A read observes
-  ; c at offset 2, which implies we should also have read a and b.
-  (let [send-a  {:type :ok, :f :send, :value [[:send :x [0 :a]]]}
-        send-bd {:type :ok, :f :send, :value [[:send :x [1 :b]]
-                                              [:send :x [3 :d]]]}
-        poll {:type :ok, :f :poll, :value [[:poll {:x [[2 :c]]}]]}]
-    (is (= [{:key :x
-             :lost [:a :b]}]
-           (-> [send-a send-bd poll] analysis :errors :lost-update)))))
+  (testing "consistent"
+    ; We submit a at offset 0, b at offset 1, and d at offset 3. A read observes
+    ; c at offset 2, which implies we should also have read a and b.
+    (let [send-a  {:type :ok, :f :send, :value [[:send :x [0 :a]]]}
+          send-bd {:type :ok, :f :send, :value [[:send :x [1 :b]]
+                                                [:send :x [3 :d]]]}
+          poll {:type :ok, :f :poll, :value [[:poll {:x [[2 :c]]}]]}]
+      (is (= [{:key :x
+               :lost [:a :b]}]
+             (-> [send-a send-bd poll] analysis :errors :lost-update)))))
+
+  (testing "inconsistent"
+    ; Here, we have inconsistent offsets. a is submitted at offset 0, but gets
+    ; overwritten by b at offset 0. c appears at offset 2. We read c, which
+    ; means we *also* should have read a and b; however, b's offset could win
+    ; when we compute the version order. To compensate, we need more than the
+    ; final version order indexes.
+    (let [send-a {:type :ok, :f :send, :value [[:send :x [0 :a]]]}
+          send-bc {:type :ok, :f :send, :value [[:send :x [0 :b]]
+                                                [:send :x [2 :c]]]}
+          read-bc {:type :ok, :f :poll, :value [[:poll {:x [[0 :b] [2 :c]]}]]}]
+      (is (= [{:key :x
+              :lost [:a]}]
+             (-> [send-a send-bc read-bc] analysis :errors :lost-update))))))
 
 (deftest poll-skip-test
   ; Process 0 observes offsets 1, 2, then 4, then 7, but we know 3 and 6

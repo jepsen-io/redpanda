@@ -9,4 +9,5 @@
                  [jepsen "0.2.6-SNAPSHOT"]
                  [org.apache.kafka/kafka-clients "3.0.0"]]
   :main jepsen.redpanda.core
+  :test-selectors {:focus :focus}
   :repl-options {:init-ns jepsen.redpanda.core})

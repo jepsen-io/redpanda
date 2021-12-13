@@ -471,15 +471,59 @@
   {:by-index (vec xs)
    :by-value (into {} (map-indexed (fn [i x] [x i]) xs))})
 
+(defn log->value->first-index
+  "Takes a log: a vector of sets of read values for each offset in a partition,
+  possibly including `nil`s. Returns a map which takes a value to the index
+  where it first appeared."
+  [log]
+  (->> (remove nil? log)
+       (reduce (fn [[earliest i] values]
+                 [(reduce (fn [earliest value]
+                            (if (contains? earliest value)
+                              earliest
+                              (assoc earliest value i)))
+                          earliest
+                          values)
+                  (inc i)])
+               [{} 0])
+       first))
+
+(defn log->last-index->values
+  "Takes a log: a vector of sets of read values for each offset in a partition,
+  possibly including `nil`s. Returns a vector which takes indices (dense
+  offsets) to sets of values whose *last* appearance was at that position."
+  [log]
+  (->> (remove nil? log)
+       ; Build up a map of values to their latest indexes
+       (reduce (fn latest [[latest i] values]
+                 [(reduce (fn [latest value]
+                            (assoc latest value i))
+                          latest
+                          values)
+                  (inc i)])
+               [{} 0])
+       first
+       ; Then invert that map into a vector of indexes to sets
+       (reduce (fn [log [value index]]
+                 (let [values (get log index #{})]
+                   (assocv log index (conj values value))))
+               [])))
+
 (defn version-orders
   "Takes a history and constructs a map of:
 
   {:orders   A map of keys to orders for that key. Each order is a map of:
-               {:by-index  A vector of all values in log order.
-                :by-value  A map of values to indexes in the log.}
+               {:by-index        A vector which maps indices to single values,
+                                 in log order.
+                :by-value        A map of values to indices in the log.
+                :log             A vector which maps offsets to sets of values
+                                 in log order.}
 
    :errors   A series of error maps describing any incompatible orders, where
-             a single offset for a key maps to multiple values.}"
+             a single offset for a key maps to multiple values.}
+
+  Offsets are directly from Kafka. Indices are *dense* offsets, removing gaps
+  in the log."
   ([history]
    (version-orders history {}))
   ([history logs]
@@ -502,15 +546,28 @@
      ; All done; transform our logs to orders.
      {:errors (->> logs
                    (mapcat (fn errors [[k log]]
-                             (->> log
-                                  (map-indexed (fn per-key [offset values]
-                                                 (when (< 1 (count values))
-                                                   {:key    k
-                                                    :offset offset
-                                                    :values values})))
-                                  (remove nil?))))
+                             (reduce (fn [[offset index errs] values]
+                                       (condp <= (count values)
+                                         ; Divergence
+                                         2 [(inc offset) (inc index)
+                                            (conj errs {:key k
+                                                        :offset offset
+                                                        :index  index
+                                                        :values values})]
+                                         ; No divergence
+                                         1 [(inc offset) (inc index) errs]
+                                         ; Hole in log
+                                         0 [(inc offset) index errs]))
+                                     [0 0 []]
+                                     log)))
+                   last
                    seq)
-      :orders (map-vals (comp index-seq (partial keep first)) logs)})))
+      :orders
+      (map-vals
+        (fn key-order [log]
+          (assoc (->> log (remove nil?) (map first) index-seq)
+                 :log log))
+        logs)})))
 
 (defn op-writes-helper
   "Takes an operation and a function which takes an offset-value pair. Returns
@@ -694,6 +751,18 @@
   if we read v_max = 3, and the version order is [1 2 3 4], we should also have
   read 1 and 2.
 
+  It's not *quite* this simple. If a message appears at multiple offsets, the
+  version order will simply pick one for us, which leads to nondeterminism. If
+  an offset has multiple messages, a successfully inserted message could appear
+  *nowhere* in the version order.
+
+  To deal with this, we examine the raw logs for each key, and build two index
+  structures. The first maps values to their earliest (index) appearance in the
+  log: we use this to determine the highest index that must have been read. The
+  second is a vector which maps indexes to sets of values whose *last*
+  appearance in the log was at that index. We use this vector to identify which
+  values ought to have been read.
+
   Once we've derived the set of values we ought to have read for some key k, we
   run through each poll of k and cross off the values read. If there are any
   values left, they must be lost updates."
@@ -703,21 +772,35 @@
        (keep (fn [[k vs]]
               ; Great, now for this key, find the highest index observed
               (let [vo         (get version-orders k)
+                    ; For each value, what's the earliest index we observed
+                    ; that value at?
+                    value->first-index (log->value->first-index (:log vo))
+                    ; And for each index, which values appeared at that index
+                    ; *last*?
+                    last-index->values (log->last-index->values (:log vo))
+
                     ;_ (info :k k :vs vs :vo vo)
-                    last-index (->> vs
-                                    ; We might observe a value but *not* know
-                                    ; its offset from either write or read.
-                                    ; When this happens, we can't say anything
-                                    ; about how much of the partition should
-                                    ; have been observed, so we skip it.
-                                    (keep (:by-value vo))
-                                    (reduce max -1))
-                    ; Now take a prefix of the version order up to that index;
-                    ; these are the values we should have observed.
-                    must-read (subvec (:by-index vo) 0 (inc last-index))
+                    ; From each value, we take the latest of the earliest
+                    ; indices that value appeared at.
+                    bound (->> vs
+                               ; We might observe a value but *not* know
+                               ; its offset from either write or read.
+                               ; When this happens, we can't say anything
+                               ; about how much of the partition should
+                               ; have been observed, so we skip it.
+                               (keep value->first-index)
+                               (reduce max -1))
+                    ; Now take a prefix of last-index->values up to that
+                    ; index; these are the values we should have observed.
+                    must-read (->> (inc bound)
+                                   (subvec last-index->values 0)
+                                   ; This is a vector of sets. We glue them
+                                   ; together this way to preserve index order.
+                                   (mapcat identity)
+                                   distinct)
                     ; Now we go *back* to the read values vs, and strip them
-                    ; out from the must-read vector; anything left is something
-                    ; we failed to read.
+                    ; out from the must-read set; anything left is something we
+                    ; failed to read.
                     lost (remove vs must-read)]
                 (when (seq lost)
                   {:key  k
