@@ -128,12 +128,23 @@
             :os        debian/os
             :client    (:client workload)
             :nemesis   (:nemesis nemesis)
-            :generator (gen/phases
-                         (->> (:generator workload)
-                              (gen/stagger    (/ (:rate opts)))
-                              (gen/nemesis    (:generator nemesis))
-                              (gen/time-limit (:time-limit opts)))
-                         (gen/nemesis (:final-generator nemesis)))
+            :generator (let [fg (:final-generator workload)]
+                         (gen/phases
+                           (->> (:generator workload)
+                                (gen/stagger    (/ (:rate opts)))
+                                (gen/nemesis    (:generator nemesis))
+                                (gen/time-limit (:time-limit opts)))
+                           (gen/nemesis (:final-generator nemesis))
+                           (when fg
+                             (gen/phases
+                               (gen/log "Waiting for recovery")
+                               (gen/sleep 10)
+                               ; Redpanda might not give consumers elements
+                               ; they want to see, so we eventually give up
+                               ; here
+                               (gen/time-limit 100
+                                 (gen/clients
+                                   (:final-generator workload)))))))
             :checker   (checker/compose
                          {:stats      (checker/stats)
                           :perf       (checker/perf

@@ -151,6 +151,14 @@
   "How many partitions per topic?"
   2)
 
+(def replication-factor
+  "What replication factor should we use for each topic?"
+  3)
+
+(def poll-ms
+  "How long should we poll for, in ms?"
+  100)
+
 (defn k->topic
   "Turns a logical key into a topic."
   [k]
@@ -174,10 +182,6 @@
    (+ (* partition-count (parse-long (nth (re-find #"t(\d+)" topic) 1)))
       partition)))
 
-(def replication-factor
-  "What replication factor should we use for each topic?"
-  3)
-
 (defn mop!
   "Applies a micro-operation from a transaction: either a :r read or a :append
   operation."
@@ -185,11 +189,12 @@
            ^Admin admin
            ^KafkaProducer producer
            ^KafkaConsumer consumer] :as client}
+   poll-ms
    mop]
   (case (first mop)
     :poll (try
             (rc/unwrap-errors
-              (let [records (.poll consumer (rc/ms->duration 10))]
+              (let [records (.poll consumer (rc/ms->duration poll-ms))]
                 (->> (.partitions records)
                      (map (fn per-topic-partition [topic-partition]
                             ; Return a key, messages pair
@@ -282,7 +287,7 @@
           (rc/unwrap-errors
             ;(.beginTransaction producer)
             (let [txn  (:value op)
-                  txn' (mapv (partial mop! this) txn)]
+                  txn' (mapv (partial mop! this (:poll-ms op poll-ms)) txn)]
               ; If we read, AND we're using :subscribe instead of assign,
               ; commit offsets. My understanding is that with assign you're not
               ; supposed to use the offset system?
@@ -347,6 +352,8 @@
   []
   (map->Client {:extant-topics (atom #{})}))
 
+;; Generator
+
 (defn txn-generator
   "Takes a list-append generator and rewrites its transactions to be [:poll] or
   [:send k v] micro-ops. Also adds a :keys field onto each operation, with a
@@ -375,15 +382,14 @@
     (when-let [[op gen'] (gen/op gen test context)]
       (if (= :pending op)
         [:pending this]
-        (let [this' (InterleaveSubscribes. gen')
-              op'   (dissoc op :keys)]
+        (let [this' (InterleaveSubscribes. gen')]
           (if (< (rand) subscribe-ratio)
             ; At random, emit a subscribe/assign op instead.
             (let [f  (rand-nth (vec (:sub-via test)))
                   op {:f f, :value (vec (:keys op))}]
               [(gen/fill-in-op op context) this])
             ; Or pass through the op directly
-            [op' (InterleaveSubscribes. gen')])))))
+            [(dissoc op :keys) (InterleaveSubscribes. gen')])))))
 
   ; Pass through updates
   (update [this test context event]
@@ -407,7 +413,95 @@
                op))
            gen))
 
-;; Checker
+(defn op->max-offsets
+  "Takes an operation (presumably, an OK one) and returns a map of keys to the
+  highest offsets interacted with in that op."
+  [{:keys [type f value]}]
+  (case type
+    (:info, :ok)
+    (case f
+      (:poll, :send, :txn)
+      (->> value
+           (map (fn [[f :as mop]]
+                  (case f
+                    :poll (->> (second mop)
+                               (map-vals (fn [pairs]
+                                           (->> pairs
+                                                (map first)
+                                                (remove nil?)
+                                                (reduce max -1)))))
+                    :send (let [[_ k v] mop]
+                            (when (and (vector? v) (first v))
+                              {k (first v)})))))
+           (reduce (partial merge-with max)))
+
+      nil)
+    nil))
+
+(defrecord TrackKeyOffsets [gen offsets]
+  gen/Generator
+  (op [this test context]
+    (when-let [[op gen'] (gen/op gen test context)]
+      (if (= :pending op)
+        [:pending this]
+        [op (TrackKeyOffsets. gen' offsets)])))
+
+  (update [this test context event]
+    (let [op-offsets (op->max-offsets event)]
+      (when-not (empty? op-offsets)
+        (swap! offsets #(merge-with max % op-offsets))))
+    (TrackKeyOffsets.
+      (gen/update gen test context event) offsets)))
+
+(defn track-key-offsets
+  "Wraps a generator. Keeps track of every key that generator touches in the
+  given atom, which is a map of keys to highest offsets seen."
+  [keys-atom gen]
+  (TrackKeyOffsets. gen keys-atom))
+
+(defrecord FinalPolls [target-offsets]
+  gen/Generator
+  (op [this test context]
+    ;(info "waiting for" target-offsets)
+    (when-not (empty? target-offsets)
+      [(gen/fill-in-op {:f :poll, :value [[:poll]], :poll-ms 1000} context)
+       this]))
+
+  (update [this test context {:keys [type f value] :as event}]
+    ; (info :update event)
+    (if (and (= type  :ok)
+             (= f     :poll))
+      (let [offsets' (reduce (fn [target-offsets' [k seen-offset]]
+                               (if (<= (get target-offsets' k -1)
+                                       seen-offset)
+                                 ; We've read past our target offset for
+                                 ; this key
+                                 (dissoc target-offsets' k)
+                                 target-offsets'))
+                             target-offsets
+                             (op->max-offsets event))]
+        (when-not (identical? target-offsets offsets')
+          (info "Process" (:process event) "now waiting for" offsets'))
+        (FinalPolls. offsets'))
+      ; Not relevant
+      this)))
+
+(defn final-polls
+  "Takes an atom containing a map of keys to offsets. Constructs a generator
+  which issues polls for every one of those keys, polling until they reach
+  those offsets."
+  [offsets]
+  (delay
+    (let [offsets @offsets]
+      (info "Polling up to offsets" offsets)
+      ; We clear the assignments to force a reset to the start of every
+      ; partition
+      [{:f :assign, :value []}
+       {:f :assign, :value (keys offsets)}
+       ; Then poll until we meet the offsets
+       (FinalPolls. offsets)])))
+
+;; Checker ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn assocv
   "An assoc on vectors which allows you to assoc at arbitrary indexes, growing
@@ -1159,13 +1253,17 @@
                           ; TODO: don't hardcode these
                           :max-txn-length 1
                           :max-writes-per-key 1024
-                          :consistency-models [:strict-serializable]))]
+                          :consistency-models [:strict-serializable]))
+        max-offsets (atom (sorted-map))]
     (-> workload
-        (assoc :client  (client)
-               :checker (checker))
+        (assoc :client          (client)
+               :checker         (checker)
+               :final-generator (gen/each-thread
+                                  (final-polls max-offsets)))
         (update :generator
                 (fn wrap-gen [gen]
-                  (-> gen
+                  (->> gen
                       txn-generator
                       tag-rw
+                      (track-key-offsets max-offsets)
                       interleave-subscribes))))))

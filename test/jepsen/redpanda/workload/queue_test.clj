@@ -6,6 +6,14 @@
             [jepsen [checker :as checker]]
             [jepsen.redpanda.workload.queue :refer :all]))
 
+(deftest op->max-offsets-test
+  (is (= {:x 5 :y 3}
+         (op->max-offsets {:type :ok,
+                           :f :txn,
+                           :value [[:poll {:x [[2 nil] [5 nil] [4 nil]]}]
+                                   [:send :y [2 nil]]
+                                   [:send :y [3 nil]]]}))))
+
 (deftest log->last-index->values-test
   (testing "empty"
     (is (= [] (log->last-index->values []))))
