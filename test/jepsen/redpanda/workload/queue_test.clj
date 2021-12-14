@@ -38,7 +38,21 @@
             ; But write c at offset 1, b at offset 3, and d at offset 4
             {:type :info, :f :txn, :value [[:send :x [1 :c]]
                                            [:send :x [3 :b]]
-                                           [:send :x [4 :d]]]}]))))
+                                           [:send :x [4 :d]]]}])))
+
+  (testing "a real-world example"
+    (let [h [{:type :invoke, :f :send, :value [[:send 11 641]], :time 280153467070, :process 379}
+{:type :ok, :f :send, :value [[:send 11 [537 641]]], :time 280169754615, :process 379}
+{:type :invoke, :f :send, :value [[:send 11 645]], :time 283654729962, :process 363}
+{:type :ok, :f :send, :value [[:send 11 [537 645]]], :time 287474569112, :process 363}
+             ]]
+      (is (= [{:key 11
+               :index  0
+               :offset 537
+               :values #{641 645}}]
+             (:errors (version-orders h)))))))
+
+
 
 (deftest g1a-test
   ; If we can observe a failed write, we have a case of G1a.

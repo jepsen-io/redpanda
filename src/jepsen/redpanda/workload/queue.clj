@@ -546,21 +546,21 @@
      ; All done; transform our logs to orders.
      {:errors (->> logs
                    (mapcat (fn errors [[k log]]
-                             (reduce (fn [[offset index errs] values]
-                                       (condp <= (count values)
-                                         ; Divergence
-                                         2 [(inc offset) (inc index)
-                                            (conj errs {:key k
-                                                        :offset offset
-                                                        :index  index
-                                                        :values values})]
-                                         ; No divergence
-                                         1 [(inc offset) (inc index) errs]
-                                         ; Hole in log
-                                         0 [(inc offset) index errs]))
-                                     [0 0 []]
-                                     log)))
-                   last
+                             (->> log
+                                  (reduce (fn [[offset index errs] values]
+                                            (condp <= (count values)
+                                              ; Divergence
+                                              2 [(inc offset) (inc index)
+                                                 (conj errs {:key    k
+                                                             :offset offset
+                                                             :index  index
+                                                             :values values})]
+                                              ; No divergence
+                                              1 [(inc offset) (inc index) errs]
+                                              ; Hole in log
+                                              0 [(inc offset) index errs]))
+                                          [0 0 []])
+                                  last)))
                    seq)
       :orders
       (map-vals
