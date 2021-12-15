@@ -503,9 +503,9 @@
   (delay
     (let [offsets @offsets]
       (info "Polling up to offsets" offsets)
-      ; We clear the assignments to force a reset to the start of every
-      ; partition
-      [{:f :assign, :value []}
+      ; We crash every client in case they have broken internal state, and
+      ; assign them to all keys.
+      [{:f :crash}
        {:f :assign, :value (keys offsets)}
        ; Then poll until we meet the offsets
        (FinalPolls. offsets)])))
