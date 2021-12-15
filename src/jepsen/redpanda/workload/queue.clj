@@ -268,6 +268,8 @@
 
   (invoke! [this test op]
     (case (:f op)
+      :crash     (assoc op :type :info)
+
       :subscribe (do (->> (:value op)
                           (map k->topic)
                           distinct
@@ -352,7 +354,7 @@
   client/Reusable
   (reusable? [this test]
     ; Later we might want to explicitly crash and tear down our client.
-    true))
+    false))
 
 (defn client
   "Constructs a fresh client for this workload."
@@ -507,6 +509,15 @@
        {:f :assign, :value (keys offsets)}
        ; Then poll until we meet the offsets
        (FinalPolls. offsets)])))
+
+(defn crash-client-gen
+  "A generator which, if the test has :crash-clients true, periodically emits
+  an operation to crash a random client."
+  [opts]
+  (when (:crash-clients opts)
+    (->> (repeat {:f :crash})
+         (gen/stagger (/ (:crash-client-interval opts)
+                         (:concurrency opts))))))
 
 ;; Checker ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -1484,15 +1495,15 @@
                           :max-writes-per-key 1024
                           :consistency-models [:strict-serializable]))
         max-offsets (atom (sorted-map))]
-    (-> workload
-        (assoc :client          (client)
-               :checker         (checker)
-               :final-generator (gen/each-thread
-                                  (final-polls max-offsets)))
-        (update :generator
-                (fn wrap-gen [gen]
-                  (->> gen
-                      txn-generator
-                      tag-rw
-                      (track-key-offsets max-offsets)
-                      interleave-subscribes))))))
+    (assoc workload
+           :client          (client)
+           :checker         (checker)
+           :final-generator (gen/each-thread
+                              (final-polls max-offsets))
+           :generator (gen/any
+                        (crash-client-gen opts)
+                        (->> (:generator workload)
+                             txn-generator
+                             tag-rw
+                             (track-key-offsets max-offsets)
+                             interleave-subscribes)))))

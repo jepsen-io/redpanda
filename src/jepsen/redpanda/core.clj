@@ -97,6 +97,18 @@
     short
     version))
 
+(defn stats-checker
+  "A modified version of the stats checker which doesn't care if :crash ops
+  always crash."
+  []
+  (let [c (checker/stats)]
+    (reify checker/Checker
+      (check [this test history opts]
+        (let [res (checker/check c test history opts)]
+          (if (every? :valid? (vals (dissoc (:by-f res) :crash)))
+            (assoc res :valid? true)
+            res))))))
+
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
@@ -146,7 +158,7 @@
                                  (gen/clients
                                    (:final-generator workload)))))))
             :checker   (checker/compose
-                         {:stats      (checker/stats)
+                         {:stats      (stats-checker)
                           :perf       (checker/perf
                                         {:nemeses (:perf nemesis)})
                           :ex         (checker/unhandled-exceptions)
@@ -166,6 +178,13 @@
 
    [nil "--auto-offset-reset BEHAVIOR" "How should consumers handle it when there's no initial offset in Kafka?"
    :default nil]
+
+   [nil "--crash-clients" "If set, periodically crashes clients and forces them to set up fresh consumers/producers/etc."]
+
+   [nil "--crash-client-interval" "Roughly how long in seconds does a single client get to run for before crashing?"
+    :default 30
+    :parse-fn read-string
+    :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
    [nil "--db-targets TARGETS" "A comma-separated list of nodes to pause/kill/etc; e.g. one,all"
     ;:default [:primaries :all]
