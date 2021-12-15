@@ -1311,15 +1311,20 @@
               ; Anything else, pass through
               (recur history' process-offsets lags))))))))
 
+(defn op->thread
+  "Returns the thread which executed a given operation."
+  [test op]
+  (-> op :process (mod (:concurrency test))))
+
 (defn plot-realtime-lag!
   "Takes a test, a collection of realtime lag measurements, and options (e.g.
   those to checker/check). Plots a graph file (realtime-lag.png) in the store
   directory"
-  [test lags {:keys [nemeses subdirectory]}]
+  [test lags {:keys [nemeses subdirectory filename
+                     group-fn group-name]}]
   (let [nemeses  (or nemeses (:nemeses (:plot test)))
         datasets (->> lags
-                      (group-by (fn [op]
-                                  (-> op :process (mod (:concurrency test)))))
+                      (group-by group-fn)
                       (map-vals (fn [lags]
                                   ; At any point in time, we want the maximum
                                   ; lag for this thread across any key.
@@ -1328,22 +1333,47 @@
                                        (map (partial util/max-by :lag))
                                        (map (juxt (comp nanos->secs :time)
                                                   (comp nanos->secs :lag)))))))
-        threads (util/polysort (keys datasets))
         output  (.getCanonicalPath
-                  (store/path! test subdirectory "realtime-lag.png"))
+                  (store/path! test subdirectory
+                               (or filename "realtime-lag.png")))
         preamble (concat (perf/preamble output)
                          [[:set :title (str (:name test)
-                                            " realtime lag by process")]
+                                            " realtime lag by "
+                                            group-name)]
                           '[set ylabel "Lag (s)"]])
-        series (for [t threads]
-                 {:title (str "Thread " t)
+        series (for [g (util/polysort (keys datasets))]
+                 {:title (str group-name " " g)
                   :with 'linespoints
-                  :data (datasets t)})]
+                  :data (datasets g)})]
     (-> {:preamble preamble
          :series series}
         perf/with-range
         perf/plot!
         (try+ (catch [:type :jepsen.checker.perf/no-points] _ :no-points)))))
+
+(defn plot-realtime-lags!
+  "Constructs realtime lag plots for all processes together, and then another
+  broken out by process, and also by key."
+  [test lags opts]
+  (->> [{:group-name "thread",     :group-fn (partial op->thread test)}
+        {:group-name "key",        :group-fn :key}
+        {:group-name "thread-key", :group-fn (juxt (partial op->thread test)
+                                                   :key)}]
+       (mapv (fn [{:keys [group-name group-fn] :as opts2}]
+               (let [opts (merge opts opts2)]
+                 (plot-realtime-lag!
+                   test lags (assoc opts :filename (str "realtime-lag-"
+                                                        group-name ".png")))
+                 (->> lags
+                      (group-by group-fn)
+                      (pmap (fn [[thread lags]]
+                              (plot-realtime-lag!
+                                test lags
+                                (assoc opts
+                                       :subdirectory (str "realtime-lag-"
+                                                          group-name)
+                                       :filename (str thread ".png")))))
+                      dorun))))))
 
 (defn worst-realtime-lag
   "Takes a seq of realtime lag measurements, and finds the point with the
@@ -1429,7 +1459,7 @@
     (check [this test history opts]
       (let [analysis (analysis history)
             bad-errors (-> (:errors analysis))]
-        (plot-realtime-lag! test (:realtime-lag analysis) opts)
+        (plot-realtime-lags! test (:realtime-lag analysis) opts)
         {:valid?             (empty? bad-errors)
          :worst-realtime-lag (-> (:worst-realtime-lag analysis)
                                  (update :time nanos->secs)
