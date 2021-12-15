@@ -53,6 +53,7 @@
   "Constructs a properties map for talking to a given Kafka node."
   [node opts]
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/consumer/ConsumerConfig.html
+  ; And https://docs.confluent.io/platform/current/installation/configuration/consumer-configs.html
   (cond->
     {ConsumerConfig/GROUP_ID_CONFIG
      "jepsen_group"
@@ -66,12 +67,30 @@
      ConsumerConfig/BOOTSTRAP_SERVERS_CONFIG
      (str node ":" port)
 
-     ; Maybe mess with these later?
-     ; ConsumerConfig/REQUEST_TIMEOUT_MS_CONFIG
-     ; 10000
+     ConsumerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+     1000
 
-     ; ConsumerConfig/DEFAULT_API_TIMEOUT_MS_CONFIG
-     ; 10000
+     ConsumerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+     500
+
+     ConsumerConfig/METADATA_MAX_AGE_CONFIG
+     60000
+
+     ConsumerConfig/REQUEST_TIMEOUT_MS_CONFIG
+     10000
+
+     ConsumerConfig/DEFAULT_API_TIMEOUT_MS_CONFIG
+     10000
+
+     ConsumerConfig/HEARTBEAT_INTERVAL_MS_CONFIG
+     300
+
+     ConsumerConfig/SESSION_TIMEOUT_MS_CONFIG
+     1000
+
+     ConsumerConfig/CONNECTIONS_MAX_IDLE_MS_CONFIG
+     60000
+
 
      ; ConsumerConfig/ISOLATION_LEVEL_DOC
      ; ???
