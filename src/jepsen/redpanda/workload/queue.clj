@@ -125,9 +125,16 @@
             [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]
-                    [util :as util :refer [map-vals parse-long pprint-str]]]
+                    [store :as store]
+                    [util :as util :refer [map-vals
+                                           nanos->secs
+                                           parse-long
+                                           pprint-str]]]
+            [jepsen.checker.perf :as perf]
             [jepsen.tests.cycle.append :as append]
-            [jepsen.redpanda [client :as rc]])
+            [jepsen.redpanda [client :as rc]]
+            [knossos [history :as history]]
+            [slingshot.slingshot :refer [try+ throw+]])
   (:import (java.util.concurrent ExecutionException)
            (org.apache.kafka.clients.admin Admin)
            (org.apache.kafka.clients.consumer ConsumerRecords
@@ -1162,10 +1169,193 @@
                               :count  number})))))
        seq))
 
+(defn realtime-lag
+  "Takes a history and yields a series of maps of the form
+
+    {:process The process performing a poll
+     :key     The key being polled
+     :time    The time the read began, in nanos
+     :lag     The realtime lag of this key, in nanos.
+
+  The lag of a key k in a poll is the conservative estimate of how long it has
+  been since the highest value in that poll was the final message in log k.
+
+  For instance, given:
+
+    {:time 1, :type :ok, :value [:send :x [0 :a]]}
+    {:time 2, :type :ok, :value [:poll {:x [0 :a]}]}
+
+  The lag of this poll is zero, since we observed the most recent completed
+  write to x. However, if we:
+
+    {:time 3, :type :ok,      :value [:send :x [1 :b]]}
+    {:time 4, :type :invoke,  :value [:poll]}
+    {:time 5, :type :ok,      :value [:poll {:x []}]}
+
+  The lag of this read is 4 - 3 = 1. By time 3, offset 1 must have existed for
+  key x. However, the most recent offset we observed was 0, which could only
+  have been the most recent offset up until the write of offset 1 at time 3.
+  Since our read could have occurred as early as time 4, the lag is at least 1.
+
+  Might want to make this into actual [lower upper] ranges, rather than just
+  the lower bound on lag, but conservative feels OK for starters."
+  [history]
+  ; First, build up a map of keys to vectors, where element i of the vector for
+  ; key k is the time at which we knew offset i+1 was no longer the most recent
+  ; thing in the log. Thus the first entry in each vector is the time at which
+  ; the log was no longer *empty*. The second entry is the time at which offset
+  ; 0 was no longer current, and so on.
+  (let [expired
+        (reduce
+          (fn expired [expired {:keys [type f time value] :as op}]
+            ; What are the most recent offsets we know exist?
+            (let [known-offsets (op->max-offsets op)]
+              (reduce
+                (fn [expired [k known-offset]]
+                  ; For this particulary key, we know this offset exists.
+                  ; Therefore we *also* know every lower offset should
+                  ; exist. We zip backwards, filling in offsets with the
+                  ; current time, until we hit an offset where a lower
+                  ; time exists.
+                  (loop [expired-k (get expired k [])
+                         i         known-offset]
+                    (if (or (neg? i) (get expired-k i))
+                      ; We've gone back before the start of the vector, or
+                      ; we hit an index that's already known to be expired
+                      ; earlier.
+                      (assoc expired k expired-k)
+                      ; Update this index
+                      (recur (assocv expired-k i time) (dec i)))))
+                expired
+                known-offsets)))
+          {}
+          history)
+        pairs (history/pair-index+ history)]
+    ; Now work through the history, turning each poll operation into a lag map.
+    (loop [history    history
+           ; A map of processes to keys to the highest offset that process has
+           ; seen. Keys in this map correspond to the keys this process
+           ; currently has :assign'ed. If using `subscribe`, keys are filled in
+           ; only when they appear in poll operations. The default offset is
+           ; -1.
+           process-offsets {}
+           ; A vector of output lag maps.
+           lags []]
+      (if-not (seq history)
+        lags
+        (let [[op & history'] history
+              {:keys [type process f value]} op]
+          (if-not (= :ok type)
+            ; Only OK ops matter
+            (recur history' process-offsets lags)
+
+            (case f
+              ; When we assign something, we replace the process's offsets map.
+              :assign
+              (recur history'
+                     (let [offsets (get process-offsets process {})]
+                       ; Preserve keys that we're still subscribing to;
+                       ; anything else gets reset to offset -1. This is gonna
+                       ; break if we use something other than auto_offset_reset
+                       ; = earliest, but... deal with that later. I've got
+                       ; limited time here and just need to get SOMETHING
+                       ; working.
+                       (assoc process-offsets process
+                              (merge (zipmap value (repeat -1))
+                                     (select-keys offsets value))))
+                     lags)
+
+              ; When we subscribe, we're not necessarily supposed to get
+              ; updates for the key we subscribed to--we subscribe to *topics*,
+              ; not individual partitions. We might get *no* updates, if other
+              ; subscribers have already claimed all the partitions for that
+              ; topic. We reset the offsets map to empty, to be conservative.
+              :subscribe
+              (recur history' (assoc process-offsets process {}) lags)
+
+              (:poll, :txn)
+              (let [invoke-time (:time (get pairs op))
+                    ; For poll ops, we merge all poll mop results into this
+                    ; process's offsets, then figure out how far behind each
+                    ; key based on the time that key offset expired.
+                    offsets' (merge-with max
+                                         (get process-offsets process {})
+                                         (op->max-offsets op))
+                    lags' (->> offsets'
+                               (map (fn [[k offset]]
+                                      ; If we've read *nothing*, then we're at
+                                      ; offset -1. Element 0 in the expired
+                                      ; vector for k tells us the time when the
+                                      ; first element was definitely present.
+                                      ; If we read offset 0, we want to consult
+                                      ; element 1 of the vector, which tells us
+                                      ; when offset 0 was no longer the tail,
+                                      ; and so on.
+                                      (let [expired-k (get expired k [])
+                                            i (inc offset)
+                                            expired-at (get-in expired
+                                                               [k (inc offset)]
+                                                               ##Inf)
+                                            lag (-> invoke-time
+                                                    (- expired-at)
+                                                    (max 0))]
+                                        {:time    invoke-time
+                                         :process process
+                                         :key     k
+                                         :lag     lag})))
+                               (into lags))]
+                (recur history'
+                       (assoc process-offsets process offsets')
+                       lags'))
+
+              ; Anything else, pass through
+              (recur history' process-offsets lags))))))))
+
+(defn plot-realtime-lag!
+  "Takes a test, a collection of realtime lag measurements, and options (e.g.
+  those to checker/check). Plots a graph file (realtime-lag.png) in the store
+  directory"
+  [test lags {:keys [nemeses subdirectory]}]
+  (let [nemeses  (or nemeses (:nemeses (:plot test)))
+        datasets (->> lags
+                      (group-by (fn [op]
+                                  (-> op :process (mod (:concurrency test)))))
+                      (map-vals (fn [lags]
+                                  ; At any point in time, we want the maximum
+                                  ; lag for this thread across any key.
+                                  (->> lags
+                                       (partition-by :time)
+                                       (map (partial util/max-by :lag))
+                                       (map (juxt (comp nanos->secs :time)
+                                                  (comp nanos->secs :lag)))))))
+        threads (util/polysort (keys datasets))
+        output  (.getCanonicalPath
+                  (store/path! test subdirectory "realtime-lag.png"))
+        preamble (concat (perf/preamble output)
+                         [[:set :title (str (:name test)
+                                            " realtime lag by process")]
+                          '[set ylabel "Lag (s)"]])
+        series (for [t threads]
+                 {:title (str "Thread " t)
+                  :with 'linespoints
+                  :data (datasets t)})]
+    (-> {:preamble preamble
+         :series series}
+        perf/with-range
+        perf/plot!
+        (try+ (catch [:type :jepsen.checker.perf/no-points] _ :no-points)))))
+
+(defn worst-realtime-lag
+  "Takes a seq of realtime lag measurements, and finds the point with the
+  highest lag."
+  [lags]
+  (or (util/max-by :lag lags) 0))
+
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
   [history]
-  (let [history               (remove (comp #{:nemesis} :process) history)
+  (let [history               (history/index history)
+        history               (remove (comp #{:nemesis} :process) history)
         version-orders        (version-orders history)
         version-order-errors  (:errors version-orders)
         version-orders        (:orders version-orders)
@@ -1188,11 +1378,16 @@
         int-send-skip-cases   (:skip int-send-skip+nm-cases)
         int-nm-send-cases     (:nonmonotonic int-send-skip+nm-cases)
         duplicate-cases       (duplicate-cases analysis)
+        ; Sort of a hack; we only bother computing this for "real" histories
+        ; because our test suite often leaves off processes and times
+        realtime-lag          (let [op (first history)]
+                                (when (every? op [:process :time])
+                                  (realtime-lag history)))
+        worst-realtime-lag    (worst-realtime-lag realtime-lag)
         ]
     {:errors (cond-> {}
                duplicate-cases
                (assoc :duplicate duplicate-cases)
-
 
                int-poll-skip-cases
                (assoc :int-poll-skip int-poll-skip-cases)
@@ -1224,7 +1419,9 @@
                (assoc :poll-skip poll-skip-cases)
 
                )
-     :version-orders version-orders}))
+     :realtime-lag       realtime-lag
+     :worst-realtime-lag worst-realtime-lag
+     :version-orders     version-orders}))
 
 (defn checker
   []
@@ -1232,11 +1429,13 @@
     (check [this test history opts]
       (let [analysis (analysis history)
             bad-errors (-> (:errors analysis))]
-        {:valid?          (empty? bad-errors)
-         :errors          (:errors analysis)
-         ;:version-orders  (->> (:version-orders analysis)
-         ;                      (map-vals :by-index)
-         ;                      (into (sorted-map)))
+        (plot-realtime-lag! test (:realtime-lag analysis) opts)
+        {:valid?             (empty? bad-errors)
+         :worst-realtime-lag (-> (:worst-realtime-lag analysis)
+                                 (update :time nanos->secs)
+                                 (update :lag nanos->secs))
+         :error-types        (keys (:errors analysis))
+         :errors             (:errors analysis)
          }))))
 
 (defn workload
