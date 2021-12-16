@@ -1499,39 +1499,40 @@
   [history]
   (let [history               (history/index history)
         history               (remove (comp #{:nemesis} :process) history)
-        version-orders        (version-orders history)
-        version-order-errors  (:errors version-orders)
-        version-orders        (:orders version-orders)
-        writes-by-type        (writes-by-type history)
-        reads-by-type         (reads-by-type history)
+        version-orders        (future (version-orders history))
+        writes-by-type        (future (writes-by-type history))
+        reads-by-type         (future (reads-by-type history))
         ; Sort of a hack; we only bother computing this for "real" histories
         ; because our test suite often leaves off processes and times
-        realtime-lag          (let [op (first history)]
-                                (when (every? op [:process :time])
-                                  (realtime-lag history)))
-        unseen                (unseen history)
+        realtime-lag          (future
+                                (let [op (first history)]
+                                  (when (every? op [:process :time])
+                                    (realtime-lag history))))
+        worst-realtime-lag    (future (worst-realtime-lag @realtime-lag))
+        unseen                (future (unseen history))
+        version-order-errors  (:errors @version-orders)
+        version-orders        (:orders @version-orders)
         analysis              {:history        history
-                               :writes-by-type writes-by-type
-                               :reads-by-type  reads-by-type
+                               :writes-by-type @writes-by-type
+                               :reads-by-type  @reads-by-type
                                :version-orders version-orders}
-        g1a-cases             (g1a-cases analysis)
-        lost-update-cases     (lost-update-cases analysis)
-        poll-skip+nm-cases    (poll-skip+nonmonotonic-cases analysis)
-        poll-skip-cases       (:skip poll-skip+nm-cases)
-        nonmonotonic-poll-cases (:nonmonotonic poll-skip+nm-cases)
-        nonmonotonic-send-cases (nonmonotonic-send-cases analysis)
-        int-poll-skip+nm-cases  (int-poll-skip+nonmonotonic-cases analysis)
-        int-poll-skip-cases   (:skip int-poll-skip+nm-cases)
-        int-nm-poll-cases     (:nonmonotonic int-poll-skip+nm-cases)
-        int-send-skip+nm-cases (int-send-skip+nonmonotonic-cases analysis)
-        int-send-skip-cases   (:skip int-send-skip+nm-cases)
-        int-nm-send-cases     (:nonmonotonic int-send-skip+nm-cases)
-        duplicate-cases       (duplicate-cases analysis)
-        worst-realtime-lag    (worst-realtime-lag realtime-lag)
+        g1a-cases               (future (g1a-cases analysis))
+        lost-update-cases       (future (lost-update-cases analysis))
+        poll-skip+nm-cases      (future (poll-skip+nonmonotonic-cases analysis))
+        nonmonotonic-send-cases (future (nonmonotonic-send-cases analysis))
+        int-poll-skip+nm-cases  (future (int-poll-skip+nonmonotonic-cases analysis))
+        int-send-skip+nm-cases  (future (int-send-skip+nonmonotonic-cases analysis))
+        duplicate-cases         (future (duplicate-cases analysis))
+        poll-skip-cases         (:skip @poll-skip+nm-cases)
+        nonmonotonic-poll-cases (:nonmonotonic @poll-skip+nm-cases)
+        int-poll-skip-cases     (:skip @int-poll-skip+nm-cases)
+        int-nm-poll-cases       (:nonmonotonic @int-poll-skip+nm-cases)
+        int-send-skip-cases     (:skip @int-send-skip+nm-cases)
+        int-nm-send-cases       (:nonmonotonic @int-send-skip+nm-cases)
         ]
     {:errors (cond-> {}
-               duplicate-cases
-               (assoc :duplicate duplicate-cases)
+               @duplicate-cases
+               (assoc :duplicate @duplicate-cases)
 
                int-poll-skip-cases
                (assoc :int-poll-skip int-poll-skip-cases)
@@ -1547,24 +1548,24 @@
                version-order-errors
                (assoc :inconsistent-offsets version-order-errors)
 
-               g1a-cases
-               (assoc :g1a g1a-cases)
+               @g1a-cases
+               (assoc :g1a @g1a-cases)
 
-               lost-update-cases
-               (assoc :lost-update lost-update-cases)
+               @lost-update-cases
+               (assoc :lost-update @lost-update-cases)
 
                nonmonotonic-poll-cases
                (assoc :nonmonotonic-poll nonmonotonic-poll-cases)
 
-               nonmonotonic-send-cases
-               (assoc :nonmonotonic-send nonmonotonic-send-cases)
+               @nonmonotonic-send-cases
+               (assoc :nonmonotonic-send @nonmonotonic-send-cases)
 
                poll-skip-cases
                (assoc :poll-skip poll-skip-cases)
                )
-     :realtime-lag       realtime-lag
-     :worst-realtime-lag worst-realtime-lag
-     :unseen             unseen
+     :realtime-lag       @realtime-lag
+     :worst-realtime-lag @worst-realtime-lag
+     :unseen             @unseen
      :version-orders     version-orders}))
 
 (defn condense-error
