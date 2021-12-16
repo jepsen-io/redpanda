@@ -282,14 +282,19 @@
       ; Get some debugging information about the partition distribution on this
       ; node
       :debug-topic-partitions
-      (let [tps (->> (:value op)
-                     (pmap (fn [k]
-                             [k (db/topic-partition-state
-                                  node (k->topic-partition k))]))
-                     (into (sorted-map)))]
-        (assoc op :type :ok, :value {:node    node
-                                     :node-id (db/node-id test node)
-                                     :partitions tps}))
+      (try+
+        (let [tps (->> (:value op)
+                       (pmap (fn [k]
+                               [k (db/topic-partition-state
+                                    node (k->topic-partition k))]))
+                       (into (sorted-map)))]
+          (assoc op :type :ok, :value {:node    node
+                                       :node-id (db/node-id test node)
+                                       :partitions tps}))
+        (catch [:type :clj-http.client/unexceptional-status] e
+          (assoc op :type :fail, :error (:body e)))
+        (catch java.net.ConnectException _
+          (assoc op :type :fail, :error :connection-refused)))
 
       ; Subscribe to the topics containing these keys
       :subscribe (do (->> (:value op)
@@ -1207,6 +1212,73 @@
                               :count  number})))))
        seq))
 
+(defn unseen
+  "Takes a history and yields a series of maps like
+
+    {:time    The time in nanoseconds
+     :unseen  A map of keys to the number of messages in that key which have
+              been successfully acknowledged, but not polled by any client.}"
+  [history]
+  (->> history
+       (reduce
+         ; Out is a vector of output observations. sent is a map of keys to
+         ; successfully sent values; polled is a map of keys to successfully
+         ; read values.
+         (fn red [[out sent polled :as acc] {:keys [type time f] :as op}]
+           (if-not (and (= type :ok)
+                        (#{:poll :send :txn} f))
+             acc
+             (let [sent'   (->> op op-writes (map-vals set)
+                                (merge-with set/union sent))
+                   polled' (->> op op-reads (map-vals set)
+                                (merge-with set/union polled))
+                   unseen  (merge-with set/difference sent' polled')]
+               ; We don't have to keep looking for things we've seen, so we can
+               ; recur with unseen rather than sent'.
+               [(conj out {:time time, :unseen (map-vals count unseen)})
+                unseen
+                polled'])))
+         [[] {}])
+       first))
+
+(defn plot-unseen!
+  "Takes a test, a collection of unseen measurements, and options (e.g. those
+  to checker/check). Plots a graph file (unseen.png) in the store directory."
+  [test unseen {:keys [subdirectory]}]
+  (let [ks       (-> unseen peek :unseen keys sort reverse vec)
+        ; Turn these into stacked graphs
+        datasets (reduce
+                   (fn [datasets {:keys [time unseen]}]
+                     ; We go through keys in reverse order so that the last
+                     ; key in the legend is on the bottom of the chart
+                     (->> ks reverse
+                          (reduce (fn [[datasets sum] k]
+                                    (if-let [count (get unseen k 0)]
+                                      (let [t        (nanos->secs time)
+                                            sum'     (+ sum count)
+                                            dataset  (get datasets k [])
+                                            dataset' (conj dataset [t sum'])]
+                                        [(assoc datasets k dataset') sum'])
+                                      ; Key doesn't exist yet
+                                      [datasets sum]))
+                                  [datasets 0])
+                          first))
+                   {}
+                   unseen)
+        output   (.getCanonicalPath
+                   (store/path! test subdirectory "unseen.png"))
+        preamble (concat (perf/preamble output)
+                         [[:set :title (str (:name test) " unseen")]
+                          '[set ylabel "Unseen messages"]])
+        series (for [k ks]
+                 {:title (str "key " k)
+                  :with '[filledcurves x1]
+                  :data (datasets k)})]
+    (-> {:preamble preamble, :series series}
+        perf/with-range
+        perf/plot!
+        (try+ (catch [:type :jepsen.checker.perf/no-points] _ :no-points)))))
+
 (defn realtime-lag
   "Takes a history and yields a series of maps of the form
 
@@ -1429,6 +1501,12 @@
         version-orders        (:orders version-orders)
         writes-by-type        (writes-by-type history)
         reads-by-type         (reads-by-type history)
+        ; Sort of a hack; we only bother computing this for "real" histories
+        ; because our test suite often leaves off processes and times
+        realtime-lag          (let [op (first history)]
+                                (when (every? op [:process :time])
+                                  (realtime-lag history)))
+        unseen                (unseen history)
         analysis              {:history        history
                                :writes-by-type writes-by-type
                                :reads-by-type  reads-by-type
@@ -1446,11 +1524,6 @@
         int-send-skip-cases   (:skip int-send-skip+nm-cases)
         int-nm-send-cases     (:nonmonotonic int-send-skip+nm-cases)
         duplicate-cases       (duplicate-cases analysis)
-        ; Sort of a hack; we only bother computing this for "real" histories
-        ; because our test suite often leaves off processes and times
-        realtime-lag          (let [op (first history)]
-                                (when (every? op [:process :time])
-                                  (realtime-lag history)))
         worst-realtime-lag    (worst-realtime-lag realtime-lag)
         ]
     {:errors (cond-> {}
@@ -1485,10 +1558,10 @@
 
                poll-skip-cases
                (assoc :poll-skip poll-skip-cases)
-
                )
      :realtime-lag       realtime-lag
      :worst-realtime-lag worst-realtime-lag
+     :unseen             unseen
      :version-orders     version-orders}))
 
 (defn condense-error
@@ -1519,11 +1592,13 @@
     (check [this test history opts]
       (let [analysis (analysis history)
             bad-errors (-> (:errors analysis))]
+        (plot-unseen!        test (:unseen analysis) opts)
         (plot-realtime-lags! test (:realtime-lag analysis) opts)
         (->> (:errors analysis)
              (map condense-error)
              (into (sorted-map))
              (merge {:valid?             (empty? bad-errors)
+                     :unseen             (peek (:unseen analysis))
                      :worst-realtime-lag (-> (:worst-realtime-lag analysis)
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))

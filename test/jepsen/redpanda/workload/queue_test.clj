@@ -378,3 +378,17 @@
       (testing "worst realtime lag"
         (is (= {:time 22, :process 0, :key :x, :lag 17}
                (:worst-realtime-lag (analysis history))))))))
+
+(deftest unseen-test
+  (is (= [{:time 0, :unseen {}}
+          {:time 1, :unseen {:x 2}}
+          {:time 2, :unseen {:x 1}}
+          {:time 3, :unseen {:x 0}}]
+         (-> [{:time 0, :type :ok, :f :poll, :value [[:poll {}]]}
+              {:time 1, :type :ok, :f :send, :value [[:send :x [0 :a]]
+                                                     [:send :x [1 :b]]]}
+              {:time 2, :type :ok, :f :poll, :value [[:poll {:x [[0 :a]]}]]}
+              {:time 3, :type :ok, :f :poll, :value [[:poll {:x [[1 :b]]}]]}
+              ]
+             analysis
+             :unseen))))
