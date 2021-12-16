@@ -1465,6 +1465,28 @@
      :worst-realtime-lag worst-realtime-lag
      :version-orders     version-orders}))
 
+(defn condense-error
+  "Takes a pair of an error type (e.g. :lost-update) and a seq of errors.
+  Returns a pair of [type, {:count n, :errors [...]}], which tries to show the
+  most interesting or severe errors without making the pretty-printer dump out
+  two gigabytes of
+  EDN."
+  [[type errs]]
+  [type
+   {:count (count errs)
+    :errs
+    (case type
+      :duplicate             (take 32      (sort-by :count errs))
+      :inconsistent-offsets  (take 32      (sort-by (comp count :values) errs)
+      :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
+      :int-nonmonotonic-send (take 8       (sort-by :delta errs))
+      :int-poll-skip         (take-last 8  (sort-by :delta errs))
+      :int-send-skip         (take-last 8  (sort-by :delta errs))
+      :nonmonotonic-poll     (take 8       (sort-by :delta errs))
+      :nonmonotonic-send     (take 8       (sort-by :delta errs))
+      :poll-skip             (take-last 8  (sort-by :delta errs))
+      errs)}])
+
 (defn checker
   []
   (reify checker/Checker
@@ -1472,13 +1494,14 @@
       (let [analysis (analysis history)
             bad-errors (-> (:errors analysis))]
         (plot-realtime-lags! test (:realtime-lag analysis) opts)
-        {:valid?             (empty? bad-errors)
-         :worst-realtime-lag (-> (:worst-realtime-lag analysis)
-                                 (update :time nanos->secs)
-                                 (update :lag nanos->secs))
-         :error-types        (keys (:errors analysis))
-         :errors             (:errors analysis)
-         }))))
+        (->> (:errors analysis)
+             (map condense-error)
+             (into (sorted-map))
+             (merge {:valid?             (empty? bad-errors)
+                     :worst-realtime-lag (-> (:worst-realtime-lag analysis)
+                                             (update :time nanos->secs)
+                                             (update :lag nanos->secs))
+                     :error-types        (keys (:errors analysis))}))))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
