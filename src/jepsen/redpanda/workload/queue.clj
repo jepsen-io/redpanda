@@ -283,14 +283,17 @@
       ; node
       :debug-topic-partitions
       (try+
-        (let [tps (->> (:value op)
-                       (pmap (fn [k]
-                               [k (db/topic-partition-state
-                                    node (k->topic-partition k))]))
-                       (into (sorted-map)))]
-          (assoc op :type :ok, :value {:node    node
-                                       :node-id (db/node-id test node)
-                                       :partitions tps}))
+        (try
+          (let [tps (->> (:value op)
+                         (pmap (fn [k]
+                                 [k (db/topic-partition-state
+                                      node (k->topic-partition k))]))
+                         (into (sorted-map)))]
+            (assoc op :type :ok, :value {:node    node
+                                         :node-id (db/node-id test node)
+                                         :partitions tps}))
+          (catch java.util.concurrent.ExecutionException e
+            (throw (util/ex-root-cause e))))
         (catch [:type :clj-http.client/unexceptional-status] e
           (assoc op :type :fail, :error (:body e)))
         (catch java.net.ConnectException _
@@ -1590,19 +1593,29 @@
   []
   (reify checker/Checker
     (check [this test history opts]
-      (let [analysis (analysis history)
-            bad-errors (-> (:errors analysis))]
-        (plot-unseen!        test (:unseen analysis) opts)
-        (plot-realtime-lags! test (:realtime-lag analysis) opts)
-        (->> (:errors analysis)
+      (let [{:keys [errors
+                    realtime-lag
+                    worst-realtime-lag
+                    unseen] :as analysis} (analysis history)
+            bad-errors    errors
+            latest-unseen (-> unseen
+                              peek
+                              (update :time nanos->secs)
+                              (update :unseen (partial into sorted-map)))]
+        ; Render plots
+        (plot-unseen!        test unseen opts)
+        (plot-realtime-lags! test realtime-lag opts)
+        ; Construct results
+        (->> errors
              (map condense-error)
              (into (sorted-map))
-             (merge {:valid?             (empty? bad-errors)
-                     :unseen             (peek (:unseen analysis))
-                     :worst-realtime-lag (-> (:worst-realtime-lag analysis)
+             (merge {:valid? (and (empty? bad-errors)
+                                  (every? zero? (vals (:unseen latest-unseen))))
+                     :unseen             latest-unseen
+                     :worst-realtime-lag (-> worst-realtime-lag
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))
-                     :error-types        (keys (:errors analysis))}))))))
+                     :error-types        (keys errors)}))))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
