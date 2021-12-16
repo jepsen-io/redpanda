@@ -112,6 +112,7 @@
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
+  (info :version (pr-str (:version opts)))
   (let [workload-name (:workload opts)
         workload      ((workloads workload-name) opts)
         db            (db/db)
@@ -154,7 +155,7 @@
                                ; Redpanda might not give consumers elements
                                ; they want to see, so we eventually give up
                                ; here
-                               (gen/time-limit (:final-gen-time-limit opts)
+                               (gen/time-limit (:final-time-limit opts)
                                  (gen/clients
                                    (:final-generator workload)))))))
             :checker   (checker/compose
@@ -179,7 +180,8 @@
    [nil "--auto-offset-reset BEHAVIOR" "How should consumers handle it when there's no initial offset in Kafka?"
    :default nil]
 
-   [nil "--crash-clients" "If set, periodically crashes clients and forces them to set up fresh consumers/producers/etc."]
+   [nil "--crash-clients" "If set, periodically crashes clients and forces them to set up fresh consumers/producers/etc."
+    :default false]
 
    [nil "--crash-client-interval" "Roughly how long in seconds does a single client get to run for before crashing?"
     :default 30
@@ -199,7 +201,7 @@
    [nil "--disable-auto-commit" "If set, enables automatic commits via Kafka consumers. If not provided, uses the client default."
     :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit false))]
 
-   [nil "--final-gen-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
+   [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
     :default  100
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
@@ -225,7 +227,7 @@
      :validate [(partial every? partition-targets) (cli/one-of partition-targets)]]
 
    [nil "--rate HZ" "Target number of ops/sec"
-    :default  40
+    :default  100
     :parse-fn read-string
     :validate validate-non-neg]
 
@@ -257,10 +259,40 @@
     :default  :list-append
     :validate [workloads (cli/one-of workloads)]]])
 
+(def test-all-cli-opts
+  "Additional options for test-all"
+  [[nil "--versions VERSIONS" "Comma separated versions to test."
+   :parse-fn #(str/split % #",\s*")
+   :default  nil
+   :validate [seq "Must not be empty"]]])
+
+(defn all-tests
+  "Takes parsed CLI options and constructs a sequence of tests."
+  [opts]
+  (let [workloads (if-let [w (:workload opts)]
+                    [w]
+                    (keys workloads))
+        versions (or (:versions opts)
+                     [(:version opts)])
+        nemeses (if (nil? (:nemesis opts))
+                  standard-nemeses
+                  [{}])]
+    (for [i (range (:test-count opts))
+          v  versions
+          w  workloads
+          n  nemeses]
+      (-> opts
+          (assoc :workload w, :version v)
+          (merge n)
+          redpanda-test))))
+
 (defn -main
   "CLI entry point."
   [& args]
   (cli/run! (merge (cli/single-test-cmd {:test-fn redpanda-test
                                          :opt-spec cli-opts})
+                   (cli/test-all-cmd {:tests-fn all-tests
+                                      :opt-spec (concat cli-opts
+                                                        test-all-cli-opts)})
                    (cli/serve-cmd))
             args))
