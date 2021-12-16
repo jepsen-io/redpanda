@@ -86,7 +86,7 @@
      300
 
      ConsumerConfig/SESSION_TIMEOUT_MS_CONFIG
-     1000
+     6000 ; Bounded by server
 
      ConsumerConfig/CONNECTIONS_MAX_IDLE_MS_CONFIG
      60000
