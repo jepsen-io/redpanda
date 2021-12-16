@@ -216,7 +216,7 @@
           ; Bump up filehandle limit
           (c/su (let [pid (util/await-fn (partial c/exec :cat pid-file)
                                          {:log-message "waiting for startup to apply ulimit"
-                                          :log-interval 10000})
+                                          :log-interval 10000})]
                   (try+
                     (c/exec :prlimit (str "--nofile=" nofile) :--pid pid)
                     (catch [:type :jepsen.control/nonzero-exit] e
