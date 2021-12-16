@@ -935,7 +935,7 @@
                    or repeat the same value.}"
   [{:keys [history version-orders]}]
   (->> history
-       (mapcat (fn per-op [op]
+       (pmap (fn per-op [op]
                  ; Consider each pair of reads of some key in this op...
                  (->> (for [[k vs]  (op-reads op)
                             [v1 v2] (partition 2 1 vs)]
@@ -961,6 +961,7 @@
                                  :delta   delta
                                  :op      op})))
                       (remove nil?))))
+       (mapcat identity)
        (group-by :type)
        (map-vals strip-types)))
 
@@ -1499,7 +1500,10 @@
            :client          (client)
            :checker         (checker)
            :final-generator (gen/each-thread
-                              (final-polls max-offsets))
+                              ; (final-polls max-offsets)
+                              (->> (final-polls max-offsets)
+                                   (gen/time-limit 10)
+                                   repeat))
            :generator (gen/any
                         (crash-client-gen opts)
                         (->> (:generator workload)

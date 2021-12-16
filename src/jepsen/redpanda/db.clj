@@ -158,7 +158,7 @@
             pid-file
             (c/lit (str data-dir "/*")))))
 
-(defrecord DB [node-ids]
+(defrecord DB [node-ids tcpdump]
   db/DB
   (setup! [this test node]
     ; Generate an initial node ID
@@ -166,6 +166,9 @@
     (install! test)
     (enable!)
     (configure! test node true)
+
+    (when (:tcpdump test)
+      (db/setup! tcpdump test node))
 
     (c/su
       ; Make sure log file is ready
@@ -187,11 +190,15 @@
   (teardown! [this test node]
     (nuke! test node)
     (c/su
-      (c/exec :rm :-f log-file)))
+      (c/exec :rm :-f log-file))
+    (when (:tcpdump test)
+      (db/teardown! tcpdump test node)))
 
   db/LogFiles
   (log-files [this test node]
-    [log-file])
+    (concat (when (:tcpdump test)
+              (db/log-files tcpdump test node))
+            [log-file]))
 
   db/Process
   (start! [this test node]
@@ -232,7 +239,8 @@
   "Constructs a Jepsen database object which knows how to set up and tear down
   a Redpanda cluster."
   []
-  (map->DB {:node-ids (atom {})}))
+  (map->DB {:node-ids (atom {})
+            :tcpdump (db/tcpdump {:ports [8082 9092 9644 33145]})}))
 
 ;; Cluster ops
 
