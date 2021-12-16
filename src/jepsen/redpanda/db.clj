@@ -129,7 +129,7 @@
   "Waits until you can create a topic."
   []
   (util/await-fn check-topic-creation
-                 {:log-interval 10
+                 {:log-interval 10000
                   :log-message  "Waiting for topic creation"}))
 
 (defn disable!
@@ -214,7 +214,9 @@
                     "/usr/bin/redpanda"
                     :--redpanda-cfg config-file))
           ; Bump up filehandle limit
-          (c/su (let [pid (util/await-fn (partial c/exec :cat pid-file))]
+          (c/su (let [pid (util/await-fn (partial c/exec :cat pid-file)
+                                         {:log-message "waiting for startup to apply ulimit"
+                                          :log-interval 10000})
                   (try+
                     (c/exec :prlimit (str "--nofile=" nofile) :--pid pid)
                     (catch [:type :jepsen.control/nonzero-exit] e
