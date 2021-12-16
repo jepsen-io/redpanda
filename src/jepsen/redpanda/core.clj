@@ -199,7 +199,7 @@
    [nil "--disable-auto-commit" "If set, enables automatic commits via Kafka consumers. If not provided, uses the client default."
     :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit false))]
 
-   [nil "--final-gen-time-limit" "How long should we run the final generator for, at most? In seconds."
+   [nil "--final-gen-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
     :default  100
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
