@@ -1601,7 +1601,7 @@
             latest-unseen (-> unseen
                               peek
                               (update :time nanos->secs)
-                              (update :unseen (partial into sorted-map)))]
+                              (update :unseen (partial into (sorted-map))))]
         ; Render plots
         (plot-unseen!        test unseen opts)
         (plot-realtime-lags! test realtime-lag opts)
