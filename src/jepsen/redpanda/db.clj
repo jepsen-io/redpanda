@@ -12,7 +12,8 @@
             [jepsen.control [net :as cn]
                             [util :as cu]]
             [jepsen.os.debian :as debian]
-            [slingshot.slingshot :refer [try+ throw+]]))
+            [slingshot.slingshot :refer [try+ throw+]])
+  (:import (org.apache.kafka.common TopicPartition)))
 
 (def user
   "What user do we run RPK commands as?"
@@ -371,6 +372,16 @@
   (-> (http/get (str "http://" node ":9644/v1/brokers")
                 common-http-opts)
       :body))
+
+(defn topic-partition-state
+  "Takes a node and a TopicPartition. Fetches the topic-partition data from
+  this node's /partitions/kafka/<topic>/<partition> API. Topics must be
+  URL-safe; we're not encoding them here."
+  [node ^TopicPartition topic-partition]
+  (:body (http/get (str "http://" node ":9644/v1/partitions/kafka/"
+                        (.topic topic-partition) "/"
+                        (.partition topic-partition))
+                   common-http-opts)))
 
 (defn decommission!
   "Asks a node `via` to decommission a node id `target`"

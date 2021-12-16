@@ -132,7 +132,8 @@
                                            pprint-str]]]
             [jepsen.checker.perf :as perf]
             [jepsen.tests.cycle.append :as append]
-            [jepsen.redpanda [client :as rc]]
+            [jepsen.redpanda [client :as rc]
+                             [db :as db]]
             [knossos [history :as history]]
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (java.util.concurrent ExecutionException)
@@ -248,7 +249,9 @@
             ; And record offset and value.
             [f k' [offset v]])))
 
-(defrecord Client [; Our three Kafka clients
+(defrecord Client [; What node are we bound to?
+                   node
+                   ; Our three Kafka clients
                    ^Admin admin
                    ^KafkaProducer producer
                    ^KafkaConsumer consumer
@@ -259,6 +262,7 @@
   (open! [this test node]
     (let [tx-id (rc/new-transactional-id)]
       (assoc this
+             :node      node
              :admin     (rc/admin test node)
 ;             :producer  (rc/producer (assoc test :transactional-id tx-id) node)
              :producer  (rc/producer test node)
@@ -268,17 +272,33 @@
 
   (invoke! [this test op]
     (case (:f op)
+      ; Assign this consumer new topic-partitions
+      :assign (do (.assign consumer (map k->topic-partition (:value op)))
+                  (assoc op :type :ok))
+
+      ; Crash this client, forcing us to open a new client (and consumer etc)
       :crash     (assoc op :type :info)
 
+      ; Get some debugging information about the partition distribution on this
+      ; node
+      :debug-topic-partitions
+      (let [tps (->> (:value op)
+                     (pmap (fn [k]
+                             [k (db/topic-partition-state
+                                  node (k->topic-partition k))]))
+                     (into (sorted-map)))]
+        (assoc op :type :ok, :value {:node    node
+                                     :node-id (db/node-id test node)
+                                     :partitions tps}))
+
+      ; Subscribe to the topics containing these keys
       :subscribe (do (->> (:value op)
                           (map k->topic)
                           distinct
                           (rc/subscribe! consumer))
                      (assoc op :type :ok))
 
-      :assign (do (.assign consumer (map k->topic-partition (:value op)))
-                  (assoc op :type :ok))
-
+      ; Apply poll/send transactions
       (:poll, :send, :txn)
       (let [; How should we interpret the operation completion :type when a
             ; single micro-op definitely fails?
@@ -497,17 +517,23 @@
 
 (defn final-polls
   "Takes an atom containing a map of keys to offsets. Constructs a generator
-  which issues polls for every one of those keys, polling until they reach
-  those offsets."
+  which:
+
+  1. Checks the topic-partition state from the admin API
+
+  2. Crashes the client, to force a fresh one to be opened, just in case
+     there's broken state inside the client.
+
+  3. Assigns the new client to poll every key
+
+  4. Polls until caught up to the offsets we think exist"
   [offsets]
   (delay
     (let [offsets @offsets]
       (info "Polling up to offsets" offsets)
-      ; We crash every client in case they have broken internal state, and
-      ; assign them to all keys.
-      [{:f :crash}
+      [{:f :debug-topic-partitions, :value (keys offsets)}
+       {:f :crash}
        {:f :assign, :value (keys offsets)}
-       ; Then poll until we meet the offsets
        (FinalPolls. offsets)])))
 
 (defn crash-client-gen
@@ -1477,7 +1503,7 @@
     :errs
     (case type
       :duplicate             (take 32      (sort-by :count errs))
-      :inconsistent-offsets  (take 32      (sort-by (comp count :values) errs)
+      :inconsistent-offsets  (take 32      (sort-by (comp count :values) errs))
       :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
       :int-nonmonotonic-send (take 8       (sort-by :delta errs))
       :int-poll-skip         (take-last 8  (sort-by :delta errs))
