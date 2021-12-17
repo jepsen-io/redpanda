@@ -110,6 +110,21 @@
             (assoc res :valid? true)
             res))))))
 
+(defn perf-checker
+  "A modified perf checker which doesn't render debug-topic-partitions, assign,
+  or crash operations."
+  [perf-opts]
+  (let [c (checker/perf perf-opts)]
+    (reify checker/Checker
+      (check [this test history opts]
+        (checker/check c test
+                       (->> history
+                            (remove (comp #{:assign
+                                            :crash
+                                            :debug-topic-partitions}
+                                          :f)))
+                       opts)))))
+
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
@@ -161,7 +176,8 @@
                                    (:final-generator workload)))))))
             :checker   (checker/compose
                          {:stats      (stats-checker)
-                          :perf       (checker/perf
+                          :clock      (checker/clock-plot)
+                          :perf       (perf-checker
                                         {:nemeses (:perf nemesis)})
                           :ex         (checker/unhandled-exceptions)
                           :assert     (checker/log-file-pattern
