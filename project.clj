@@ -10,4 +10,17 @@
                  [org.apache.kafka/kafka-clients "3.0.0"]]
   :main jepsen.redpanda.core
   :test-selectors {:focus :focus}
-  :repl-options {:init-ns jepsen.redpanda.core})
+  :repl-options {:init-ns jepsen.redpanda.core}
+  :jvm-opts ["-server"
+             "-Djava.awt.headless=true"
+             ; GC tuning--see
+             ; https://wiki.openjdk.java.net/display/shenandoah/Main
+             ; https://wiki.openjdk.java.net/display/zgc/Main
+             ;"-XX+UseZGC"
+             ;"-XX+UseShenandoahGC"
+             "-Xmx24g"
+             ;"-XX:+UseLargePages" ; requires users do so some OS-level config
+             "-XX:+AlwaysPreTouch"
+             ; Instrumentation
+             ;"-agentpath:/home/aphyr/yourkit/bin/linux-x86-64/libyjpagent.so=disablestacktelemetry,exceptions=disable,delay=10000"
+             ])
