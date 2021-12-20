@@ -139,18 +139,37 @@
            :nodes (zipmap (:nodes test) (repeat :active))))
 
   (node-view [this test node]
-    (->> (c/on-nodes test [node]
-                     (fn fetch-node-view [test node]
-                       (if-not (rdb/enabled?)
-                         [] ; Not a part of the cluster
-                         (when-let [info (rdb/cluster-info)]
-                           (->> info
-                                :brokers
-                                (mapv (fn xform-broker [broker]
-                                        {:node (ip->node test (:host broker))
-                                         :id   (:id broker)})))))))
-         first
-         val))
+    (try (let [enabled? (-> test
+                            (c/on-nodes [node]
+                                        (fn enabled? [_ _] (rdb/enabled?)))
+                            (get node))]
+           (assert (or (= true enabled?) (= false enabled?))
+                   (str "Expected bool, got " (pr-str enabled?)))
+           (if-not enabled?
+             ; Not a part of the cluster
+             []
+             ; Turn each state into an id/node/status map.
+             (mapv (fn [state]
+                     {:id   (:node_id state)
+                      :node (rdb/node-id->node test (:node_id state))
+                      :status (:membership_status state)})
+                   (rdb/broker-state node))))
+         (catch java.net.ConnectException e
+           nil))
+    ; We actually can't trust rpk cluster info, evidently!
+    ;(->> (c/on-nodes test [node]
+    ;                 (fn fetch-node-view [test node]
+    ;                   (if-not (rdb/enabled?)
+    ;                     [] ; Not a part of the cluster
+    ;                     (when-let [info (rdb/cluster-info)]
+    ;                       (->> info
+    ;                            :brokers
+    ;                            (mapv (fn xform-broker [broker]
+    ;                                    {:node (ip->node test (:host broker))
+    ;                                     :id   (:id broker)})))))))
+    ;     first
+    ;     val))
+    )
 
   (merge-views [this test]
     ; Straightforward merge by node id, picking any representation of a node.
