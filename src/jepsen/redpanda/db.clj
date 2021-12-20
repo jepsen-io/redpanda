@@ -101,6 +101,12 @@
   ([test node initial?]
   (c/su
     (let [id (node-id test node)]
+      ; If Redpanda creates a topic automatically, it might be under-replicated
+      (rpk! :config :set "redpanda.auto_create_topics_enabled" false)
+      ; Redpanda's internal topic kafka_internal/group/0 only has replication
+      ; factor of 0; you need to set it to 3 if you want actual fault
+      ; tolerance for consumer groups.
+      (rpk! :config :set "redpanda.default_topic_replications" 3)
       (rpk! :config :bootstrap
             :--id     id
             :--self   (cn/local-ip)
