@@ -1639,7 +1639,8 @@
            :checker         (checker)
            :final-generator (gen/each-thread
                               ; (final-polls max-offsets)
-                              (->> (final-polls max-offsets)
+                              (->> (gen/phases (final-polls max-offsets)
+                                               (repeat (gen/sleep 1)))
                                    (gen/time-limit 10)
                                    repeat))
            :generator (gen/any
