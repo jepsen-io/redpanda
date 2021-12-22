@@ -832,6 +832,108 @@
        (filter (fn [op]
                  (some #{offset} (get (op-write-offsets op) k))))))
 
+(defn reads-of-key-value
+  "Returns a seq of all operations which read the given key and value."
+  [k value history]
+  (->> history
+       (reads-of-key k)
+       (filter (fn [op] (some #{value} (get (op-reads op) k))))))
+
+(defn writes-of-key-value
+  "Returns a seq of all operations which wrote the given key and value."
+  [k value history]
+  (->> history
+       (writes-of-key k)
+       (filter (fn [op] (some #{value} (get (op-writes op) k))))))
+
+(defn op-around-key-offset
+  "Takes an operation and returns that operation with its value trimmed so that
+  any send/poll operations are constrained to just the given key, and values
+  within n of the given offset. Returns nil if operation is not relevant."
+  ([k offset op]
+   (op-around-key-offset k offset 3 op))
+  ([k offset n op]
+   (when (and (= :ok (:type op))
+              (#{:send :poll :txn} (:f op)))
+     (let [value'
+           (keep (fn [[f v :as mop]]
+                   (case f
+                     :poll (when-let [pairs (get v k)]
+                             ; Trim pairs to region around offset
+                             (let [trimmed
+                                   (filter (fn [[o v]]
+                                             (<= (- offset n) o (+ offset n)))
+                                           pairs)]
+                               (when (seq trimmed)
+                                 [:poll {k trimmed}])))
+                     :send (let [[_ k2 [o v]] mop]
+                             (when (and (= k k2)
+                                        (<= (- offset n) o (+ offset n)))
+                               mop))))
+                 (:value op))]
+       (when-not (empty? value')
+         (assoc op :value value'))))))
+
+(defn around-key-offset
+  "Filters a history to just those operations around a given key and offset;
+  trimming their mops to just those regions as well."
+  ([k offset history]
+   (around-key-offset k offset 3 history))
+  ([k offset n history]
+   (keep (partial op-around-key-offset k offset n) history)))
+
+(defn around-some
+  "Clips a sequence to just those elements near a predicate. Takes a predicate,
+  a range n, and a sequence xs. Returns the series of all x in xs such x is
+  within n elements of some x' matching predicate."
+  [pred n coll]
+  (let [indices (first
+                  (reduce (fn [[indices i] x]
+                            (if (pred x)
+                              [(into indices (range (- i n) (+ i n 1))) (inc i)]
+                              [indices (inc i)]))
+                          [#{} 0]
+                          coll))]
+    (first (reduce (fn [[out i] x]
+                     (if (indices i)
+                       [(conj out x) (inc i)]
+                       [out (inc i)]))
+                   [[] 0]
+                   coll))))
+
+(defn op-around-key-value
+  "Takes an operation and returns that operation with its value trimmed so that
+  any send/poll operations are constrained to just the given key, and values
+  within n of the given value. Returns nil if operation is not relevant."
+  ([k value op]
+   (op-around-key-value k value 3 op))
+  ([k value n op]
+   (when (and (= :ok (:type op))
+              (#{:send :poll :txn} (:f op)))
+     (let [value'
+           (keep (fn [[f v :as mop]]
+                   (case f
+                     :poll (when-let [pairs (get v k)]
+                             ; Trim pairs to region around offset
+                             (let [trimmed (around-some (comp #{value} second)
+                                                        n pairs)]
+                               (when (seq trimmed)
+                                 {k trimmed})))
+                     :send (let [[_ k2 [o v]] mop]
+                             (when (and (= k k2) (= value v))
+                               mop))))
+                 (:value op))]
+       (when-not (empty? value')
+         (assoc op :value value'))))))
+
+(defn around-key-value
+  "Filters a history to just those operations around a given key and value;
+  trimming their mops to just those regions as well."
+  ([k value history]
+   (around-key-value k value 3 history))
+  ([k value n history]
+   (keep (partial op-around-key-value k value n) history)))
+
 (defn writes-by-type
   "Takes a history and constructs a map of types (:ok, :info, :fail) to maps of
   keys to the set of all values which were written for that key. We use this to
