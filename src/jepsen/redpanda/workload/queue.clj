@@ -1220,29 +1220,35 @@
 
     {:time    The time in nanoseconds
      :unseen  A map of keys to the number of messages in that key which have
-              been successfully acknowledged, but not polled by any client.}"
+              been successfully acknowledged, but not polled by any client.}
+
+  The final map in the series includes a :messages key: a map of keys to sets
+  of messages that were unseen."
   [history]
-  (->> history
-       (reduce
-         ; Out is a vector of output observations. sent is a map of keys to
-         ; successfully sent values; polled is a map of keys to successfully
-         ; read values.
-         (fn red [[out sent polled :as acc] {:keys [type time f] :as op}]
-           (if-not (and (= type :ok)
-                        (#{:poll :send :txn} f))
-             acc
-             (let [sent'   (->> op op-writes (map-vals set)
-                                (merge-with set/union sent))
-                   polled' (->> op op-reads (map-vals set)
-                                (merge-with set/union polled))
-                   unseen  (merge-with set/difference sent' polled')]
-               ; We don't have to keep looking for things we've seen, so we can
-               ; recur with unseen rather than sent'.
-               [(conj out {:time time, :unseen (map-vals count unseen)})
-                unseen
-                polled'])))
-         [[] {}])
-       first))
+  (let [[out unseen]
+        (reduce
+          ; Out is a vector of output observations. sent is a map of keys to
+          ; successfully sent values; polled is a map of keys to successfully
+          ; read values.
+          (fn red [[out sent polled :as acc] {:keys [type time f] :as op}]
+            (if-not (and (= type :ok)
+                         (#{:poll :send :txn} f))
+              acc
+              (let [sent'   (->> op op-writes (map-vals set)
+                                 (merge-with set/union sent))
+                    polled' (->> op op-reads (map-vals set)
+                                 (merge-with set/union polled))
+                    unseen  (merge-with set/difference sent' polled')]
+                ; We don't have to keep looking for things we've seen, so we can
+                ; recur with unseen rather than sent'.
+                [(conj! out {:time time, :unseen (map-vals count unseen)})
+                 unseen
+                 polled'])))
+          [(transient []) {} {}]
+          history)
+        out (persistent! out)]
+    (update out (dec (count out))
+            assoc :messages unseen)))
 
 (defn plot-unseen!
   "Takes a test, a collection of unseen measurements, and options (e.g. those
@@ -1569,26 +1575,27 @@
      :version-orders     version-orders}))
 
 (defn condense-error
-  "Takes a pair of an error type (e.g. :lost-update) and a seq of errors.
-  Returns a pair of [type, {:count n, :errors [...]}], which tries to show the
-  most interesting or severe errors without making the pretty-printer dump out
-  two gigabytes of
-  EDN."
-  [[type errs]]
+  "Takes a test and a  pair of an error type (e.g. :lost-update) and a seq of
+  errors. Returns a pair of [type, {:count n, :errors [...]}], which tries to
+  show the most interesting or severe errors without making the pretty-printer
+  dump out two gigabytes of EDN."
+  [test [type errs]]
   [type
    {:count (count errs)
     :errs
-    (case type
-      :duplicate             (take 32      (sort-by :count errs))
-      :inconsistent-offsets  (take 32      (sort-by (comp count :values) errs))
-      :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
-      :int-nonmonotonic-send (take 8       (sort-by :delta errs))
-      :int-poll-skip         (take-last 8  (sort-by :delta errs))
-      :int-send-skip         (take-last 8  (sort-by :delta errs))
-      :nonmonotonic-poll     (take 8       (sort-by :delta errs))
-      :nonmonotonic-send     (take 8       (sort-by :delta errs))
-      :poll-skip             (take-last 8  (sort-by :delta errs))
-      errs)}])
+    (if (:all-errors test)
+      errs
+      (case type
+        :duplicate             (take 32      (sort-by :count errs))
+        :inconsistent-offsets  (take 32 (sort-by (comp count :values) errs))
+        :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
+        :int-nonmonotonic-send (take 8       (sort-by :delta errs))
+        :int-poll-skip         (take-last 8  (sort-by :delta errs))
+        :int-send-skip         (take-last 8  (sort-by :delta errs))
+        :nonmonotonic-poll     (take 8       (sort-by :delta errs))
+        :nonmonotonic-send     (take 8       (sort-by :delta errs))
+        :poll-skip             (take-last 8  (sort-by :delta errs))
+        errs))}])
 
 (defn checker
   []
@@ -1601,6 +1608,7 @@
             bad-errors    errors
             latest-unseen (-> unseen
                               peek
+                              (dissoc :messages)
                               (update :time nanos->secs)
                               (update :unseen (partial into (sorted-map))))]
         ; Render plots
@@ -1608,7 +1616,7 @@
         (plot-realtime-lags! test realtime-lag opts)
         ; Construct results
         (->> errors
-             (map condense-error)
+             (map (partial condense-error test))
              (into (sorted-map))
              (merge {:valid? (and (empty? bad-errors)
                                   (every? zero? (vals (:unseen latest-unseen))))
