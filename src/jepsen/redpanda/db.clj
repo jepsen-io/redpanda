@@ -221,10 +221,11 @@
                     :--redpanda-cfg config-file))
           ; Bump up filehandle limit
           (c/su (let [pid (util/await-fn
-                            (fn get-pid
+                            (fn get-pid []
                               (let [pid (c/exec :cat pid-file)]
                                 (when-not (re-find #"\d+\n?" pid)
-                                  (throw+ {:type :no-pid-in-file}))))
+                                  (throw+ {:type :no-pid-in-file}))
+                                pid))
                             {:log-message "waiting for startup to apply ulimit"
                              :log-interval 10000})]
                   (try+

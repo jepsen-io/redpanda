@@ -68,7 +68,13 @@
                    (keep (fn [node]
                            (->> (get node-views node)
                                 (find-by :id id)))))]
-    (< 1/2 (/ (count known) (count active)))))
+    (if (< (count active) 3)
+      (do (warn "Fewer than 3 active nodes in cluster:" (pr-str active) "\n"
+                (pprint-str nodes)
+                "\n\n"
+                (pprint-str node-views))
+          false)
+      (< 1/2 (/ (count known) (count active))))))
 
 (defn remove-node-op
   "We can remove a node from a cluster if it's in the view, and removing it
@@ -281,7 +287,11 @@
                       ; OK, this op might have or definitely did take place. But
                       ; if a majority of active nodes still think it's in the
                       ; cluster, we'll wait.
-                      (known-to-active-majority? this (:id (:value op)))
+                      (do (let [known? (known-to-active-majority? this (:id (:value op)))]
+                            (info ":remove-node" (:value op)
+                                  (if known? "is still" "is no longer")
+                                  "known to an active majority")
+                            known?))
                       this
 
                       ; Mostly forgotten--let's call this done!
