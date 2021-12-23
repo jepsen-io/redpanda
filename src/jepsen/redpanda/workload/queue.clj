@@ -1668,7 +1668,10 @@
   renders an HTML timeline of how each operation perceived that key's log."
   [test {:keys [version-orders errors history] :as analysis}]
   (let [history (filter (comp #{:ok} :type) history)]
-    (->> errors :inconsistent-offsets (map :key) distinct
+    (->> (select-keys errors [:inconsistent-offsets :duplicate])
+         (mapcat val)
+         (map :key)
+         distinct
          (pmap (fn [k]
                  (let [html (key-order-viz k
                                            (get-in version-orders [k :log])
