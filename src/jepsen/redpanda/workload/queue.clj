@@ -1389,8 +1389,10 @@
                           first))
                    {}
                    unseen)
+        ; Grab just the final poll section of history
         final-polls (->> test :history rseq
-                         (take-while (comp #{:poll} :f)))
+                         (take-while (comp #{:poll :crash :assign
+                                             :debug-topic-partitions} :f)))
         ; Draw a line for the start and end of final polls.
         final-poll-lines (->> [(first final-polls) (last final-polls)]
                               (map (comp nanos->secs :time))
