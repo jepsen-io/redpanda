@@ -119,11 +119,13 @@
   polls k and observes any of v1, v2, or v3, but not *all* of them. This
   miiight be captured as a wr-rw cycle in some cases, but perhaps not all,
   since we're only generating rw edges for final reads."
-  (:require [clojure [set :as set]]
+  (:require [clojure [pprint :refer [pprint]]
+                     [set :as set]]
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+]]
             [elle.list-append :refer [rand-bg-color]]
+            [gnuplot.core :as g]
             [hiccup.core :as h]
             [jepsen [checker :as checker]
                     [client :as client]
@@ -1387,11 +1389,25 @@
                           first))
                    {}
                    unseen)
+        final-polls (->> test :history rseq
+                         (take-while (comp #{:poll} :f)))
+        ; Draw a line for the start and end of final polls.
+        final-poll-lines (->> [(first final-polls) (last final-polls)]
+                              (map (comp nanos->secs :time))
+                              (map (fn [t]
+                                     [:set :arrow
+                                      :from (g/list t [:graph 0])
+                                      :to   (g/list t [:graph 1])
+                                      :lc   :rgb "#F3974A"
+                                      :lw   "1"
+                                      :nohead])))
         output   (.getCanonicalPath
                    (store/path! test subdirectory "unseen.png"))
         preamble (concat (perf/preamble output)
                          [[:set :title (str (:name test) " unseen")]
-                          '[set ylabel "Unseen messages"]])
+                          '[set ylabel "Unseen messages"]]
+                         final-poll-lines)
+        _ (pprint preamble)
         series (for [k ks]
                  {:title (str "key " k)
                   :with '[filledcurves x1]
