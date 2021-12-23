@@ -220,9 +220,13 @@
                     "/usr/bin/redpanda"
                     :--redpanda-cfg config-file))
           ; Bump up filehandle limit
-          (c/su (let [pid (util/await-fn (partial c/exec :cat pid-file)
-                                         {:log-message "waiting for startup to apply ulimit"
-                                          :log-interval 10000})]
+          (c/su (let [pid (util/await-fn
+                            (fn get-pid
+                              (let [pid (c/exec :cat pid-file)]
+                                (when-not (re-find "\d+\n?" pid)
+                                  (throw+ {:type :no-pid-in-file}))))
+                            {:log-message "waiting for startup to apply ulimit"
+                             :log-interval 10000})]
                   (try+
                     (c/exec :prlimit (str "--nofile=" nofile) :--pid pid)
                     (catch [:type :jepsen.control/nonzero-exit] e
