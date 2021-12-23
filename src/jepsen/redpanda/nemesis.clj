@@ -131,6 +131,9 @@
    pending    ; Pending [op op'] pairs of membership operations we're waiting
               ; to resolve
    nodes      ; A map of nodes to states. Node states are:
+              ;  :init     Freshly joined. We need to wait for these to be
+              ;            reflected on all test nodes before we
+              ;            consider them :active.
               ;  :active   In the cluster
               ;  :adding   Joining the cluster but not yet complete
               ;  :removing Being removed from the cluster but not yet complete
@@ -142,7 +145,7 @@
   membership/State
   (setup! [this test]
     (assoc this
-           :nodes (zipmap (:nodes test) (repeat :active))))
+           :nodes (zipmap (:nodes test) (repeat :init))))
 
   (node-view [this test node]
     (try (let [enabled? (-> test
@@ -155,11 +158,12 @@
              ; Not a part of the cluster
              []
              ; Turn each state into an id/node/status map.
-             (mapv (fn [state]
-                     {:id   (:node_id state)
-                      :node (rdb/node-id->node test (:node_id state))
-                      :status (:membership_status state)})
-                   (rdb/broker-state node))))
+             (->> (rdb/broker-state node)
+                  (map (fn [state]
+                         {:id   (:node_id state)
+                          :node (rdb/node-id->node test (:node_id state))
+                          :status (:membership_status state)}))
+                  (sort-by :id))))
          (catch java.net.ConnectException e
            nil))
     ; We actually can't trust rpk cluster info, evidently!
@@ -248,64 +252,79 @@
            [(assoc op :error {:type :connect-exception}) this])))))
 
   (resolve [this test]
-    (reduce
-      (fn resolve-op [this [{:keys [f value] :as op} op' :as pair]]
-        (cond ; It's possible to add and remove a node in rapid succession,
-              ; such that the add op remains pending because we never got a
-              ; chance to see it. Once a node is free, we clear all pending ops
-              ; associated with that node, regardless of instance.
-              (= :free (get (:nodes this) (:node (:value op))))
-              (update this :pending disj pair)
-
-              true
-              (case f
-                ; Once an adding node is known to an active majority, we
-                ; consider it active, and mark its add op as resolved.
-                :add-node
-                (if-not (known-to-active-majority? this (:id (:value op')))
-                  ; Still waiting
-                  this
-                  ; Accepted!
-                  (let [node (:node value)]
-                    (-> this
-                        (update :nodes assoc node :active)
-                        (update :pending disj pair))))
-
-                ; Free always completes synchronously
-                :free-node
+    ; When we start off, we've got nodes in state :init--we try to transition
+    ; those to :active as soon as they're present in every view. This is our
+    ; bootstrapping process--we can't trust the active set on startup because
+    ; cluster join might be incomplete, leaving some "active" nodes not
+    ; actually knowing who's in the cluster.
+    (let [this (reduce (fn [this node]
+                         (let [view (-> this :node-views (get node))]
+                           (if (= (set (:nodes test))
+                                  (set (map :node view)))
+                             ; This node has fully joined
+                             (update this :nodes assoc node :active)
+                             this)))
+                       this
+                       (nodes-in-states #{:init} (:nodes this)))]
+      ; Now handle pending ops
+      (reduce
+        (fn resolve-op [this [{:keys [f value] :as op} op' :as pair]]
+          (cond ; It's possible to add and remove a node in rapid succession,
+                ; such that the add op remains pending because we never got a
+                ; chance to see it. Once a node is free, we clear all pending
+                ; ops associated with that node, regardless of instance.
+                (= :free (get (:nodes this) (:node (:value op))))
                 (update this :pending disj pair)
 
-                :remove-node
-                (cond ; Definitely didn't happen; we're done here.
-                      (= 400 (:code (:error op')))
-                      (update this :pending disj pair)
+                true
+                (case f
+                  ; Once an adding node is known to an active majority, we
+                  ; consider it active, and mark its add op as resolved.
+                  :add-node
+                  (if-not (known-to-active-majority? this (:id (:value op')))
+                    ; Still waiting
+                    this
+                    ; Accepted!
+                    (let [node (:node value)]
+                      (-> this
+                          (update :nodes assoc node :active)
+                          (update :pending disj pair))))
 
-                      ; Likewise, can't have happened.
-                      (= :connect-exception (:type (:error op')))
-                      (update this :pending disj pair)
+                  ; Free always completes synchronously
+                  :free-node
+                  (update this :pending disj pair)
 
-                      ; OK, this op might have or definitely did take place. But
-                      ; if a majority of active nodes still think it's in the
-                      ; cluster, we'll wait.
-                      (do (let [known? (known-to-active-majority? this (:id (:value op)))]
-                            (info ":remove-node" (:value op)
-                                  (if known? "is still" "is no longer")
-                                  "known to an active majority")
-                            known?))
-                      this
+                  :remove-node
+                  (cond ; Definitely didn't happen; we're done here.
+                        (= 400 (:code (:error op')))
+                        (update this :pending disj pair)
 
-                      ; Mostly forgotten--let's call this done!
-                      :else
-                      (let [node (:node (:value op))]
-                        (-> this
-                            (update :nodes assoc node :removed)
-                            (update :pending disj pair))))
+                        ; Likewise, can't have happened.
+                        (= :connect-exception (:type (:error op')))
+                        (update this :pending disj pair)
 
-                ; Dunno how to resolve this :f
-                nil
-                this)))
-      this
-      pending))
+                        ; OK, this op might have or definitely did take place.
+                        ; But if a majority of active nodes still think it's in
+                        ; the cluster, we'll wait.
+                        (do (let [known? (known-to-active-majority? this (:id (:value op)))]
+                              (info ":remove-node" (:value op)
+                                    (if known? "is still" "is no longer")
+                                    "known to an active majority")
+                              known?))
+                        this
+
+                        ; Mostly forgotten--let's call this done!
+                        :else
+                        (let [node (:node (:value op))]
+                          (-> this
+                              (update :nodes assoc node :removed)
+                              (update :pending disj pair))))
+
+                  ; Dunno how to resolve this :f
+                  nil
+                  this)))
+        this
+        pending)))
 
   ; Unused; we implement resolve manually.
   (resolve-op [this test pair])
