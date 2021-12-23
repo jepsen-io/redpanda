@@ -223,7 +223,7 @@
           (c/su (let [pid (util/await-fn
                             (fn get-pid
                               (let [pid (c/exec :cat pid-file)]
-                                (when-not (re-find "\d+\n?" pid)
+                                (when-not (re-find #"\d+\n?" pid)
                                   (throw+ {:type :no-pid-in-file}))))
                             {:log-message "waiting for startup to apply ulimit"
                              :log-interval 10000})]
