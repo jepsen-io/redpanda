@@ -120,8 +120,11 @@
   miiight be captured as a wr-rw cycle in some cases, but perhaps not all,
   since we're only generating rw edges for final reads."
   (:require [clojure [set :as set]]
+            [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+]]
+            [elle.list-append :refer [rand-bg-color]]
+            [hiccup.core :as h]
             [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]
@@ -787,6 +790,12 @@
   "Returns a map of keys to the sequence of all values read for that key."
   [op]
   (op-reads-helper op second))
+
+(defn op-pairs
+  "Returns a map of keys to the sequence of all [offset value] pairs either
+  written or read for that key; writes first."
+  [op]
+  (merge-with concat (op-write-pairs op) (op-read-pairs op)))
 
 (defn reads-of-key
   "Returns a seq of all operations which read the given key, and, optionally,
@@ -1602,6 +1611,70 @@
   [lags]
   (or (util/max-by :lag lags) 0))
 
+(defn key-order-viz
+  "Takes a key, a log for that key (a vector of offsets to sets of elements
+  which were observed at that offset), and a history of ops relevant to that
+  key. Constructs a Hiccup structure visualizing all views of the log's
+  offsets."
+  [k log history]
+  [:html
+   [:head
+    [:style "th { text-align: left; }"]]
+   [:body
+    [:h1 (str "Key " k)]
+    [:table
+     [:thead
+      [:tr
+       [:th "Index"]
+       [:th "Time (s)"]
+       [:th "Process"]
+       [:th "Fun"]
+       [:th {:colspan 32} "View of log"]]]
+     [:tbody
+      (->> (for [{:keys [index time process f] :as op} history]
+             (when-let [pairs (-> op op-pairs (get k))]
+               [:tr
+                (concat
+                  [[:td index]
+                   [:td (when time (format "%.2f" (nanos->secs time)))]
+                   [:td process]
+                   [:td (when f (name f))]]
+                  ; TODO: not handling duplicate offsets here; will
+                  ; need to fix when we go to txns
+                  (->> pairs
+                       (reduce
+                         (fn per-cell [cells [offset value]]
+                           (if (nil? offset)
+                             cells
+                             ; Is this an unambiguous offset?
+                             (let [compat? (-> log (nth offset) count (< 2))
+                                   attrs (if compat?
+                                           {}
+                                           {:style (str "background: "
+                                                        (rand-bg-color
+                                                          value))})]
+                               (assocv cells offset [:td attrs value]))))
+                         [])
+                       (map (fn [cell]
+                              (if (nil? cell)
+                                [:td]
+                                cell)))))]))
+           (remove nil?))]]]])
+
+(defn render-order-viz!
+  "Takes a test, an analysis, and for each key with version order errors
+  renders an HTML timeline of how each operation perceived that key's log."
+  [test {:keys [version-orders errors history] :as analysis}]
+  (let [history (filter (comp #{:ok} :type) history)]
+    (->> errors :inconsistent-offsets (map :key) distinct
+         (pmap (fn [k]
+                 (let [html (key-order-viz k
+                                           (get-in version-orders [k :log])
+                                           history)
+                       path (store/path! test "orders" (format "%03d.html" k))]
+                   (spit path (h/html html)))))
+         dorun)))
+
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
   [history]
@@ -1653,6 +1726,7 @@
 
                int-send-skip-cases
                (assoc :int-send-skip int-send-skip-cases)
+
                version-order-errors
                (assoc :inconsistent-offsets version-order-errors)
 
@@ -1671,6 +1745,7 @@
                poll-skip-cases
                (assoc :poll-skip poll-skip-cases)
                )
+     :history            history
      :realtime-lag       @realtime-lag
      :worst-realtime-lag @worst-realtime-lag
      :unseen             @unseen
@@ -1714,6 +1789,7 @@
                               (update :time nanos->secs)
                               (update :unseen (partial into (sorted-map))))]
         ; Render plots
+        (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
         (plot-realtime-lags! test realtime-lag opts)
         ; Construct results
@@ -1740,9 +1816,7 @@
   (let [workload (append/test
                    (assoc opts
                           ; TODO: don't hardcode these
-                          :max-txn-length 1
-                          :max-writes-per-key 1024
-                          :consistency-models [:strict-serializable]))
+                          :max-txn-length 1))
         max-offsets (atom (sorted-map))]
     (assoc workload
            :client          (client)

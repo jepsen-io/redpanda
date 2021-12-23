@@ -6,7 +6,7 @@
                     [cli :as cli]
                     [generator :as gen]
                     [tests :as tests]
-                    [util :as util]]
+                    [util :as util :refer [parse-long]]]
             [jepsen.os.debian :as debian]
             [jepsen.redpanda [db :as db]
                              [nemesis :as nemesis]]
@@ -225,6 +225,11 @@
 
    [nil "--idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
     :default nil]
+
+   [nil "--max-writes-per-key LIMIT" "How many writes do we perform per key at most?"
+    :default 1024
+    :parse-fn parse-long
+    :validate [pos? "Must be positive"]]
 
     [nil "--nemesis FAULTS" "A comma-separated list of nemesis faults to enable"
      :parse-fn parse-nemesis-spec
