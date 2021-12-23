@@ -299,6 +299,8 @@
             (throw (util/ex-root-cause e))))
         (catch [:type :clj-http.client/unexceptional-status] e
           (assoc op :type :fail, :error (:body e)))
+        (catch java.net.SocketTimeoutException _
+          (assoc op :type :fail, :error :timeout))
         (catch java.net.ConnectException _
           (assoc op :type :fail, :error :connection-refused)))
 
