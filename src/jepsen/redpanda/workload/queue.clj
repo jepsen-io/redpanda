@@ -1407,7 +1407,6 @@
                          [[:set :title (str (:name test) " unseen")]
                           '[set ylabel "Unseen messages"]]
                          final-poll-lines)
-        _ (pprint preamble)
         series (for [k ks]
                  {:title (str "key " k)
                   :with '[filledcurves x1]
@@ -1731,6 +1730,17 @@
         int-nm-poll-cases       (:nonmonotonic @int-poll-skip+nm-cases)
         int-send-skip-cases     (:skip @int-send-skip+nm-cases)
         int-nm-send-cases       (:nonmonotonic @int-send-skip+nm-cases)
+        last-unseen             (-> (peek @unseen)
+                                    (update :unseen
+                                            (fn [unseen]
+                                              (->> unseen
+                                                   (filter (comp pos? val))
+                                                   (into (sorted-map)))))
+                                    (update :messages
+                                            (fn [messages]
+                                              (->> messages
+                                                   (filter (comp seq val))
+                                                   (into (sorted-map))))))
         ]
     {:errors (cond-> {}
                @duplicate-cases
@@ -1765,6 +1775,9 @@
 
                poll-skip-cases
                (assoc :poll-skip poll-skip-cases)
+
+               (seq (:unseen last-unseen))
+               (assoc :unseen last-unseen)
                )
      :history            history
      :realtime-lag       @realtime-lag
@@ -1779,21 +1792,27 @@
   dump out two gigabytes of EDN."
   [test [type errs]]
   [type
-   {:count (count errs)
-    :errs
-    (if (:all-errors test)
-      errs
-      (case type
-        :duplicate             (take 32      (sort-by :count errs))
-        :inconsistent-offsets  (take 32 (sort-by (comp count :values) errs))
-        :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
-        :int-nonmonotonic-send (take 8       (sort-by :delta errs))
-        :int-poll-skip         (take-last 8  (sort-by :delta errs))
-        :int-send-skip         (take-last 8  (sort-by :delta errs))
-        :nonmonotonic-poll     (take 8       (sort-by :delta errs))
-        :nonmonotonic-send     (take 8       (sort-by :delta errs))
-        :poll-skip             (take-last 8  (sort-by :delta errs))
-        errs))}])
+   (case type
+     :unseen (if (:all-errors test)
+               errs
+               (assoc errs :messages
+                      (map-vals (comp (partial take 32) sort)
+                                (:messages errs))))
+     {:count (count errs)
+      :errs
+      (if (:all-errors test)
+        errs
+        (case type
+          :duplicate             (take 32      (sort-by :count errs))
+          :inconsistent-offsets  (take 32 (sort-by (comp count :values) errs))
+          :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
+          :int-nonmonotonic-send (take 8       (sort-by :delta errs))
+          :int-poll-skip         (take-last 8  (sort-by :delta errs))
+          :int-send-skip         (take-last 8  (sort-by :delta errs))
+          :nonmonotonic-poll     (take 8       (sort-by :delta errs))
+          :nonmonotonic-send     (take 8       (sort-by :delta errs))
+          :poll-skip             (take-last 8  (sort-by :delta errs))
+          errs))})])
 
 (defn checker
   []
@@ -1802,13 +1821,7 @@
       (let [{:keys [errors
                     realtime-lag
                     worst-realtime-lag
-                    unseen] :as analysis} (analysis history)
-            bad-errors    errors
-            latest-unseen (-> unseen
-                              peek
-                              (dissoc :messages)
-                              (update :time nanos->secs)
-                              (update :unseen (partial into (sorted-map))))]
+                    unseen] :as analysis} (analysis history)]
         ; Render plots
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
@@ -1817,9 +1830,7 @@
         (->> errors
              (map (partial condense-error test))
              (into (sorted-map))
-             (merge {:valid? (and (empty? bad-errors)
-                                  (every? zero? (vals (:unseen latest-unseen))))
-                     :unseen             latest-unseen
+             (merge {:valid?             (empty? errors)
                      :worst-realtime-lag (-> worst-realtime-lag
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))
