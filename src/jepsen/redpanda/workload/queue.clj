@@ -123,7 +123,7 @@
                      [set :as set]]
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
-            [dom-top.core :refer [assert+]]
+            [dom-top.core :refer [assert+ real-pmap loopr]]
             [elle.list-append :refer [rand-bg-color]]
             [gnuplot.core :as g]
             [hiccup.core :as h]
@@ -290,7 +290,7 @@
       (try+
         (try
           (let [tps (->> (:value op)
-                         (pmap (fn [k]
+                         (real-pmap (fn [k]
                                  [k (db/topic-partition-state
                                       node (k->topic-partition k))]))
                          (into (sorted-map)))]
