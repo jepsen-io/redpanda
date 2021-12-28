@@ -54,6 +54,13 @@
   [test]
   (c/su
     (c/exec :curl :-1sLf "https://packages.vectorized.io/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh" | :sudo :-E :bash)
+    ; Wipe out config file so we don't re-use previous run settings
+    (c/exec :rm :-f "/etc/redpanda/redpanda.yaml")
+    (c/exec :apt-get :-y
+            :--allow-downgrades
+            :--allow-change-held-packages
+            :-o "DPkg::options::=--force-confmiss"
+            :--reinstall :install (str "redpanda=" (:version test)))
     (debian/install {:redpanda (:version test)})
     ; We're going to manage daemons ourselves
     (c/exec :systemctl :stop :redpanda)
@@ -102,11 +109,19 @@
   (c/su
     (let [id (node-id test node)]
       ; If Redpanda creates a topic automatically, it might be under-replicated
-      (rpk! :config :set "redpanda.auto_create_topics_enabled" false)
+      (let [e (:enable-server-auto-create-topics test)]
+        (when-not (nil? e)
+          (info "Setting redpanda.auto_create_topics_enabled" e)
+          (rpk! :config :set "redpanda.auto_create_topics_enabled" false)))
+
       ; Redpanda's internal topic kafka_internal/group/0 only has replication
-      ; factor of 0; you need to set it to 3 if you want actual fault
+      ; factor of 1; you need to set it to 3 if you want actual fault
       ; tolerance for consumer groups.
-      (rpk! :config :set "redpanda.default_topic_replications" 3)
+      (let [r (:default-topic-replications test)]
+        (when-not (nil? r)
+          (info "Setting default-topic_replications" r)
+          (rpk! :config :set "redpanda.default_topic_replications" r)))
+
       (rpk! :config :bootstrap
             :--id     id
             :--self   (cn/local-ip)

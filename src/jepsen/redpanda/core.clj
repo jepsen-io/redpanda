@@ -151,6 +151,11 @@
                             (when-let [r (:retries opts)] (str " retries=" r))
                             (when-let [aor (:auto-offset-reset opts)]
                               (str " aor=" aor))
+                            (when-let [r (:default-topic-replications opts)]
+                              (str " default-r=" r))
+                            (when (contains?
+                                    opts :enable-server-auto-create-topics)
+                              (str " auto-topics=" (:enable-server-auto-create-topics opts)))
                             (when-let [n (:nemesis opts)]
                               (str " " (->> n (map name) sort (str/join ",")))))
             :db        db
@@ -211,12 +216,24 @@
     :parse-fn parse-comma-kws
     :validate [(partial every? db-targets) (cli/one-of db-targets)]]
 
+   [nil "--default-topic-replications INT" "If set, sets Redpanda's default topic replications to this factor. If unset, leaves it as the default value."
+    :default nil
+    :parse-fn parse-long
+    :validate [pos? "must be positive"]]
+
    [nil "--enable-auto-commit" "If set, disables automatic commits via Kafka consumers. If not provided, uses the client default."
     :default  nil
     :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit true))]
 
    [nil "--disable-auto-commit" "If set, enables automatic commits via Kafka consumers. If not provided, uses the client default."
     :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit false))]
+
+   [nil "--enable-server-auto-create-topics" "If set, enables automatic topic creation on the server. If not provided, uses the server default."
+    :default  nil
+    :assoc-fn (fn [m _ _] (assoc m :enable-server-auto-create-topics true))]
+
+   [nil "--disable-server-auto-create-topics" "If set, disables automatic topic creation on the server. If not provided, uses the server default."
+    :assoc-fn (fn [m _ _] (assoc m :enable-server-auto-create-topics false))]
 
    [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
     :default  100
