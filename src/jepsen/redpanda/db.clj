@@ -419,6 +419,14 @@
                         (.partition topic-partition))
                    common-http-opts)))
 
+(defn cluster-view
+  "Returns a versioned view of the cluster from the new API. This was
+  introduced in development builds after 21.11.2 because neither `rpk cluster
+  info` nor `/brokers` could be trusted. ;-)"
+  [node]
+  (:body (http/get (str "http://" node ":9644/v1/cluster_view")
+                   common-http-opts)))
+
 (defn decommission!
   "Asks a node `via` to decommission a node id `target`"
   [via target]
