@@ -56,12 +56,20 @@
     (c/exec :curl :-1sLf "https://packages.vectorized.io/nzc4ZYQK3WRGd9sy/redpanda/cfg/setup/bash.deb.sh" | :sudo :-E :bash)
     ; Wipe out config file so we don't re-use previous run settings
     (c/exec :rm :-f "/etc/redpanda/redpanda.yaml")
-    (c/exec :apt-get :-y
-            :--allow-downgrades
-            :--allow-change-held-packages
-            :-o "DPkg::options::=--force-confmiss"
-            :--reinstall :install (str "redpanda=" (:version test)))
-    (debian/install {:redpanda (:version test)})
+    (if-let [deb (:deb test)]
+      ; Install custom debian package
+      (let [dir "/tmp/jepsen/redpanda"
+            remote-deb (str dir "/deb")]
+        (info "Installing" deb)
+        (c/exec :mkdir :-p dir)
+        (c/upload deb remote-deb)
+        (c/exec :dpkg :--force-confmiss :-i remote-deb))
+      ; Install from apt repo
+      (c/exec :apt-get :-y
+              :--allow-downgrades
+              :--allow-change-held-packages
+              :-o "DPkg::options::=--force-confmiss"
+              :--reinstall :install (str "redpanda=" (:version test))))
     ; We're going to manage daemons ourselves
     (c/exec :systemctl :stop :redpanda)
     (c/exec :systemctl :stop :wasm_engine)
@@ -184,7 +192,7 @@
   db/DB
   (setup! [this test node]
     ; Generate an initial node ID
-    (info "Node ID" (gen-node-id! test node))
+    (gen-node-id! test node)
     (install! test)
     (enable!)
     (configure! test node true)

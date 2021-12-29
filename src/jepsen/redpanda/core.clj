@@ -92,11 +92,14 @@
    })
 
 (defn short-version
-  "Truncates a debian version string like 21.11.2-1-f58e69b6 to just 21.11.2"
-  [version]
-  (if-let [[m short] (re-find #"^([\d\.]+)-" version)]
-    short
-    version))
+  "Takes CLI options and returns a short version string like \"21.11.2\" or
+  \"foo.deb\"."
+  [{:keys [version deb]}]
+  (if deb
+    (nth (re-find #"/?([^\/]+)$" deb) 1)
+    (if-let [[_ short] (re-find #"^([\d\.]+)-" version)]
+      short
+      version)))
 
 (defn stats-checker
   "A modified version of the stats checker which doesn't care if :crash ops
@@ -143,7 +146,7 @@
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
-           {:name      (str (short-version (:version opts))
+           {:name      (str (short-version opts)
                             " " (name workload-name)
                             " "
                             (->> opts :sub-via (map name) sort (str/join ","))
@@ -216,6 +219,8 @@
     :parse-fn parse-comma-kws
     :validate [(partial every? db-targets) (cli/one-of db-targets)]]
 
+   [nil "--deb FILE" "Install this specific .deb file instead of downloading --version"]
+
    [nil "--default-topic-replications INT" "If set, sets Redpanda's default topic replications to this factor. If unset, leaves it as the default value."
     :default nil
     :parse-fn parse-long
@@ -236,7 +241,7 @@
     :assoc-fn (fn [m _ _] (assoc m :enable-server-auto-create-topics false))]
 
    [nil "--final-time-limit SECONDS" "How long should we run the final generator for, at most? In seconds."
-    :default  100
+    :default  200
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
