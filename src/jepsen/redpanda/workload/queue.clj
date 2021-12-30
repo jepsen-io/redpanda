@@ -517,13 +517,13 @@
   [keys-atom gen]
   (TrackKeyOffsets. gen keys-atom))
 
-(defrecord FinalPolls [target-offsets]
+(defrecord FinalPolls [target-offsets gen]
   gen/Generator
   (op [this test context]
     ;(info "waiting for" target-offsets)
     (when-not (empty? target-offsets)
-      [(gen/fill-in-op {:f :poll, :value [[:poll]], :poll-ms 1000} context)
-       this]))
+      (when-let [[op gen'] (gen/op gen test context)]
+        [op (assoc this :gen gen')])))
 
   (update [this test context {:keys [type f value] :as event}]
     ; (info :update event)
@@ -540,7 +540,7 @@
                              (op->max-offsets event))]
         (when-not (identical? target-offsets offsets')
           (info "Process" (:process event) "now waiting for" offsets'))
-        (FinalPolls. offsets'))
+        (FinalPolls. offsets' gen))
       ; Not relevant
       this)))
 
@@ -555,15 +555,21 @@
 
   3. Assigns the new client to poll every key
 
-  4. Polls until caught up to the offsets we think exist"
+  4. Polls repeatedly
+
+  This process repeats every 10 seconds until polls have caught up to the
+  offsets in the offsets atom."
   [offsets]
   (delay
     (let [offsets @offsets]
       (info "Polling up to offsets" offsets)
-      [{:f :debug-topic-partitions, :value (keys offsets)}
-       {:f :crash}
-       {:f :assign, :value (keys offsets)}
-       (FinalPolls. offsets)])))
+      (->> [{:f :crash}
+            {:f :debug-topic-partitions, :value (keys offsets)}
+            {:f :assign, :value (keys offsets)}
+            (repeat {:f :poll, :value [[:poll]], :poll-ms 1000})]
+           (gen/time-limit 10000)
+           repeat
+           (FinalPolls. offsets)))))
 
 (defn crash-client-gen
   "A generator which, if the test has :crash-clients true, periodically emits
