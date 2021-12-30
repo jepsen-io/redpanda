@@ -130,6 +130,11 @@
           (info "Setting default-topic_replications" r)
           (rpk! :config :set "redpanda.default_topic_replications" r)))
 
+      ; Set up idempotence
+      (when (:server-idempotence test)
+        (rpk! :config :set :redpanda.id_allocator_replication 3)
+        (rpk! :config :set :redpanda.enable_idempotence true))
+
       (rpk! :config :bootstrap
             :--id     id
             :--self   (cn/local-ip)

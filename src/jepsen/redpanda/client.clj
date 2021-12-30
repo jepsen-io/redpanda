@@ -186,10 +186,20 @@
   [test node]
   (Admin/create (->properties (admin-config node))))
 
+(defn ^Duration ms->duration
+  "Constructs a Duration from millis."
+  [ms]
+  (Duration/ofMillis ms))
+
 (defn close!
   "Closes any AutoCloseable."
   [^java.lang.AutoCloseable c]
   (.close c))
+
+(defn close-producer!
+  "Closes a producer *immediately*, without waiting for incomplete requests."
+  [^KafkaProducer p]
+  (.close p (ms->duration 0)))
 
 (defn create-topic!
   "Creates a new topic using an admin client. Synchronous. If the topic already
@@ -215,11 +225,6 @@
   "Constructs a ProducerRecord from a topic, partition, key, and value."
   [topic partition key value]
   (ProducerRecord. topic (int partition) key value))
-
-(defn ^Duration ms->duration
-  "Constructs a Duration from millis."
-  [ms]
-  (Duration/ofMillis ms))
 
 (defn subscribe!
   "Subscribes to the given set of topics."

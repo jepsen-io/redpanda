@@ -148,7 +148,8 @@
                                               KafkaConsumer)
            (org.apache.kafka.clients.producer KafkaProducer
                                               RecordMetadata)
-           (org.apache.kafka.common TopicPartition)
+           (org.apache.kafka.common KafkaException
+                                    TopicPartition)
            (org.apache.kafka.common.errors DisconnectException
                                            InvalidTopicException
                                            InvalidReplicationFactorException
@@ -236,7 +237,10 @@
                 ; Send message to Redpanda
                 partition (k->partition k)
                 record (rc/producer-record topic (k->partition k) nil v)
-                res    ^RecordMetadata @(.send producer record)
+                res    ^RecordMetadata (-> producer
+                                           (.send record)
+                                           (deref 10000 nil)
+                                           (or (throw+ {:type :timeout})))
                 k'     (topic-partition->k (.topic res)
                                            (.partition res))
                 offset (when (.hasOffset res)
@@ -327,7 +331,7 @@
                             ; commit as a unit. Without txns, these should be
                             ; info, because earlier writes may have committed.
                             :info)]
-        (try
+        (try+
           (rc/unwrap-errors
             ;(.beginTransaction producer)
             (let [txn  (:value op)
@@ -377,19 +381,29 @@
                                            (.getMessage e)]))
 
           (catch TimeoutException _
+            (assoc op :type :info, :error :timeout))
+
+          (catch KafkaException e
+            (condp re-find (.getMessage e)
+              #"broker is not available"
+              (assoc op :type mop-fail-type, :error :broker-not-available)
+
+              (throw e)))
+
+          (catch [:type :timeout] e
             (assoc op :type :info, :error :timeout))))))
 
   (teardown! [this test])
 
   (close! [this test]
     (rc/close! admin)
-    (rc/close! producer)
+    (rc/close-producer! producer)
     (rc/close! consumer))
 
   client/Reusable
   (reusable? [this test]
-    ; Later we might want to explicitly crash and tear down our client.
-    false))
+             ; When we crash, we want to tear down our connections
+             false))
 
 (defn client
   "Constructs a fresh client for this workload."

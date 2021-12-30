@@ -67,7 +67,7 @@
   to be NOISY"
   {"org.apache.kafka.clients.FetchSessionHandler"                    :warn
    ; This complains about invalid topics during partitions, too
-   "org.apache.kafka.clients.Metadata"                               :fatal
+   "org.apache.kafka.clients.Metadata"                               :off
    ; This is going to give us all kinds of NOT_CONTROLLER or
    ; UNKNOWN_SERVER_ERROR messages during partitions
    "org.apache.kafka.clients.NetworkClient"                          :error
@@ -85,8 +85,10 @@
    ; Comment this to see the config opts for producers
    "org.apache.kafka.clients.producer.ProducerConfig"                :warn
    ; We're gonna get messages constantly about NOT_LEADER_OR_FOLLOWER whenever
-   ; we create a topic
-   "org.apache.kafka.clients.producer.internals.Sender"              :error
+   ; we create a topic, and it's also going to complain when trying to send to
+   ; paused brokers that they're not available
+   "org.apache.kafka.clients.producer.internals.Sender"              :off
+   "org.apache.kafka.clients.producer.internals.TransactionManager"  :warn
    "org.apache.kafka.common.metrics.Metrics"                         :warn
    "org.apache.kafka.common.utils.AppInfoParser"                     :warn
    })
@@ -128,6 +130,27 @@
                                           :f)))
                        opts)))))
 
+(defn test-name
+  "Takes CLI options and constructs a test name as a string."
+  [opts]
+  (str (short-version opts)
+       " " (name (:workload opts))
+       " "
+       (->> opts :sub-via (map name) sort (str/join ","))
+       (when-let [acks (:acks opts)] (str " acks=" acks))
+       (when-let [r (:retries opts)] (str " retries=" r))
+       (when-let [aor (:auto-offset-reset opts)]
+         (str " aor=" aor))
+       (when-let [r (:default-topic-replications opts)]
+         (str " default-r=" r))
+       (when (contains?
+               opts :enable-server-auto-create-topics)
+         (str " auto-topics=" (:enable-server-auto-create-topics opts)))
+       (when (contains? opts :idempotence)
+         (str " idem=" (:idempotence opts)))
+       (when-let [n (:nemesis opts)]
+         (str " " (->> n (map name) sort (str/join ","))))))
+
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
@@ -146,21 +169,7 @@
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
-           {:name      (str (short-version opts)
-                            " " (name workload-name)
-                            " "
-                            (->> opts :sub-via (map name) sort (str/join ","))
-                            (when-let [acks (:acks opts)] (str " acks=" acks))
-                            (when-let [r (:retries opts)] (str " retries=" r))
-                            (when-let [aor (:auto-offset-reset opts)]
-                              (str " aor=" aor))
-                            (when-let [r (:default-topic-replications opts)]
-                              (str " default-r=" r))
-                            (when (contains?
-                                    opts :enable-server-auto-create-topics)
-                              (str " auto-topics=" (:enable-server-auto-create-topics opts)))
-                            (when-let [n (:nemesis opts)]
-                              (str " " (->> n (map name) sort (str/join ",")))))
+           {:name      (test-name opts)
             :db        db
             :os        debian/os
             :client    (:client workload)
@@ -245,7 +254,7 @@
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
-   [nil "--idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
+   [nil "--[no-]idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
     :default nil]
 
    [nil "--max-writes-per-key LIMIT" "How many writes do we perform per key at most?"
@@ -278,16 +287,20 @@
    [nil "--retries COUNT" "Producer retries. If omitted, uses client default."
     :parse-fn util/parse-long]
 
-   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --disable-server-auto-create-topics, --acks all, --default-topic-replications 3, --disable-server --retries 0, --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
+   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --disable-server-auto-create-topics, --acks all, --default-topic-replications 3, --disable-server --retries 1000, --idempotence, --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
     :assoc-fn (fn [m _ _]
                 (assoc m
                        :default-topic-replications 3
                        :enable-auto-commit false
                        :acks "all"
-                       :retries 0
+                       :retries 1000
+                       :idempotence true
                        :auto-offset-reset "earliest"
                        :enable-server-auto-create-topics false
                        :sub-via #{:assign}))]
+
+   [nil "--[no-]server-idempotence" "If set, enables server idempotence support."
+    :default true]
 
    [nil "--sub-via STRATEGIES" "A comma-separated list like `assign,subscribe`, which denotes how we ask clients to assign topics to themselves."
     :default #{:subscribe}

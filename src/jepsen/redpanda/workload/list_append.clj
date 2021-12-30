@@ -123,7 +123,7 @@
 
   (close! [this test]
     (rc/close! admin)
-    (rc/close! producer)
+    (rc/close-producer! producer)
     (rc/close! consumer)))
 
 (defn client
