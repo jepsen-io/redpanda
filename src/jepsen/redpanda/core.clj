@@ -278,13 +278,15 @@
    [nil "--retries COUNT" "Producer retries. If omitted, uses client default."
     :parse-fn util/parse-long]
 
-   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --acks all, --retries 0, --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
+   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --disable-server-auto-create-topics, --acks all, --default-topic-replications 3, --disable-server --retries 0, --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
     :assoc-fn (fn [m _ _]
                 (assoc m
+                       :default-topic-replications 3
                        :enable-auto-commit false
                        :acks "all"
                        :retries 0
                        :auto-offset-reset "earliest"
+                       :enable-server-auto-create-topics false
                        :sub-via #{:assign}))]
 
    [nil "--sub-via STRATEGIES" "A comma-separated list like `assign,subscribe`, which denotes how we ask clients to assign topics to themselves."
