@@ -245,7 +245,6 @@
     :assoc-fn (fn [m _ _] (assoc m :enable-auto-commit false))]
 
    [nil "--enable-server-auto-create-topics" "If set, enables automatic topic creation on the server. If not provided, uses the server default."
-    :default  nil
     :assoc-fn (fn [m _ _] (assoc m :enable-server-auto-create-topics true))]
 
    [nil "--disable-server-auto-create-topics" "If set, disables automatic topic creation on the server. If not provided, uses the server default."
@@ -256,8 +255,7 @@
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
 
-   [nil "--[no-]idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."
-    :default nil]
+   [nil "--[no-]idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."]
 
    [nil "--max-writes-per-key LIMIT" "How many writes do we perform per key at most?"
     :default 1024
