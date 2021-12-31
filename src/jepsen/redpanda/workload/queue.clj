@@ -1701,11 +1701,11 @@
            (remove nil?))]]]])
 
 (defn render-order-viz!
-  "Takes a test, an analysis, and for each key with version order errors
+  "Takes a test, an analysis, and for each key with certain errors
   renders an HTML timeline of how each operation perceived that key's log."
   [test {:keys [version-orders errors history] :as analysis}]
   (let [history (filter (comp #{:ok} :type) history)]
-    (->> (select-keys errors [:inconsistent-offsets :duplicate])
+    (->> (select-keys errors [:inconsistent-offsets :duplicate :lost-update])
          (mapcat val)
          (map :key)
          distinct
