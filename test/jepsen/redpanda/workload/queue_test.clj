@@ -452,7 +452,7 @@
              analysis
              :unseen))))
 
-(deftest ^:focus g0-test
+(deftest g0-test
   ; Here, two transactions write an object to two different keys, and obtain
   ; conflicting orders: a write cycle.
   (let [wa  (o 0 0 :invoke :send [[:send :x :a] [:send :y :a]])
@@ -464,3 +464,28 @@
              :steps [{:type :ww, :key :x, :value :a, :value' :b}
                      {:type :ww, :key :y, :value :b, :value' :a}]}]
            (-> [wa wb wa' wb'] analysis :errors :G0)))))
+
+(deftest g1c-pure-wr-test
+  ; Transaction t1 is visible to t2, and t2 is visible to t1
+  (let [t1  (o 0 0 :invoke :txn [[:send :x :a] [:poll]])
+        t2  (o 1 1 :invoke :txn [[:send :y :b] [:poll]])
+        t1' (o 2 0 :ok :txn [[:send :x [0 :a]] [:poll {:y [[0 :b]]}]])
+        t2' (o 3 1 :ok :txn [[:send :y [0 :b]] [:poll {:x [[0 :a]]}]])]
+    (is (= [{:type :G1c
+             :cycle [t1' t2' t1']
+             :steps [{:type :wr, :key :x, :value :a}
+                     {:type :wr, :key :y, :value :b}]}]
+           (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))
+
+(deftest g1c-ww-wr-test
+  ; Transaction t1 writes something which is followed by a write of t2, but
+  ; also observes a different write from t2
+  (let [t1  (o 0 0 :invoke :txn [[:send :x :a]          [:send :y :c]])
+        t2  (o 1 1 :invoke :txn [[:poll]                [:send :y :b]])
+        t1' (o 2 0 :ok     :txn [[:send :x [0 :a]]      [:send :y [2 :c]]])
+        t2' (o 3 1 :ok     :txn [[:poll {:x [[0 :a]]}]  [:send :y [1 :b]]])]
+    (is (= [{:type :G1c
+             :cycle [t1' t2' t1']
+             :steps [{:type :wr, :key :x, :value :a}
+                     {:type :ww, :key :y, :value :b, :value' :c}]}]
+           (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))

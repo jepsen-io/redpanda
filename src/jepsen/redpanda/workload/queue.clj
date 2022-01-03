@@ -1728,13 +1728,28 @@
   operation which attempted to write that value."
   [history]
   (loopr [writer-of (transient {})]
-         [op      (remove (comp #{:invoke} :type) history)
+         [op     (remove (comp #{:invoke} :type) history)
           [k vs] (op-writes op)
-          v       vs]
+          v      vs]
          (let [k-writer-of  (get writer-of k (transient {}))
                k-writer-of' (assoc! k-writer-of v op)]
            (recur (assoc! writer-of k k-writer-of')))
          (map-vals persistent! (persistent! writer-of))))
+
+(defn readers-of
+  "Takes a history and builds a map of keys to values to vectors of completion
+  operations which observed those that value."
+  [history]
+  (loopr [readers (transient {})]
+         [op     (remove (comp #{:invoke} :type) history)
+          [k vs] (op-reads op)
+          v      vs]
+         (let [k-readers   (get readers   k (transient {}))
+               kv-readers  (get k-readers v [])
+               kv-readers' (conj kv-readers op)
+               k-readers'  (assoc! k-readers v kv-readers')]
+           (recur (assoc! readers k k-readers')))
+         (map-vals persistent! (persistent! readers))))
 
 (defn previous-value
   "Takes a version order for a key and a value. Returns the previous value in
@@ -1782,11 +1797,42 @@
                  (g/forked g))
    :explainer (WWExplainer. writer-of version-orders)})
 
+(defrecord WRExplainer [writer-of]
+  elle/DataExplainer
+  (explain-pair-data [_ a b]
+    (->> (for [[k vs] (op-reads b)
+               v vs]
+           (if-let [writer (-> writer-of (get k) (get v))]
+             (when (= a writer)
+               {:type  :wr
+                :key   k
+                :value v})
+             (throw+ {:type :no-writer-of-value, :key k, :value v})))
+         (remove nil?)
+         first))
+
+  (render-explanation [_ {:keys [key value] :as m} a-name b-name]
+    (str a-name " sent " (pr-str value) " to " (pr-str key)
+         " which was polled by " b-name)))
+
+(defn wr-graph
+  "Analyzes a history to extract write-read dependencies. T1 < T2 iff T1 writes
+  some v to k and T2 reads k."
+  [{:keys [writer-of readers-of]} history]
+  {:graph (loopr [g (g/linear (g/digraph))]
+                 [[k v->readers] readers-of
+                  [v readers]    v->readers]
+                 (if-let [writer (-> writer-of (get k) (get v))]
+                   (recur (g/link-to-all g writer readers :wr))
+                   (throw+ {:type :no-writer-of-value, :key k, :value v}))
+                 (g/forked g))
+   :explainer (WRExplainer. writer-of)})
+
 (defn graph
   "A combined Elle dependency graph between completion operations."
   [analysis history]
   ((elle/combine (partial ww-graph analysis)
-                 ;(partial wr-graph analysis)
+                 (partial wr-graph analysis)
                  ;(partial rw-graph analysis))
                  )
    history))
@@ -1813,6 +1859,7 @@
         writes-by-type        (future (writes-by-type history))
         reads-by-type         (future (reads-by-type history))
         writer-of             (future (writer-of history))
+        readers-of            (future (readers-of history))
         ; Sort of a hack; we only bother computing this for "real" histories
         ; because our test suite often leaves off processes and times
         realtime-lag          (future
@@ -1825,6 +1872,7 @@
         version-orders        (:orders @version-orders)
         analysis              {:history        history
                                :writer-of      @writer-of
+                               :readers-of     @readers-of
                                :writes-by-type @writes-by-type
                                :reads-by-type  @reads-by-type
                                :version-orders version-orders}
