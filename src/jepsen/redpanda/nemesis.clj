@@ -113,7 +113,7 @@
        (map (fn [node]
               {:type  :info
                :f     :free-node
-               :value node}))
+               :value {:node node}}))
        rand-nth-empty))
 
 (defn add-node-op
@@ -248,12 +248,13 @@
       :remove-node})
 
   (op [this test]
-    (or (->> [(free-node-op   test this)
-              (add-node-op    test this)
-              (remove-node-op test this)]
-             (remove nil?)
-             rand-nth-empty)
-        :pending))
+    (if-let [op (->> [(free-node-op   test this)
+                      (add-node-op    test this)
+                      (remove-node-op test this)]
+                     (remove nil?)
+                     rand-nth-empty)]
+      (assoc-in op [:value :view-version] (:version view))
+      :pending))
 
   (invoke! [this test {:keys [f value] :as op}]
     (case f
@@ -276,7 +277,7 @@
            this']))
 
       :free-node
-      (let [node value]
+      (let [node (:node value)]
         (c/on-nodes test [node] rdb/nuke!)
         [(assoc op :done? true)
          (update this :nodes assoc node :free)])
