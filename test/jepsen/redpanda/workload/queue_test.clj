@@ -14,6 +14,11 @@
     (dissoc coll-or-map :index)
     (map #(dissoc % :index) coll-or-map)))
 
+(defn o
+ "Shorthand op constructor"
+ [index process type f value]
+ {:index index, :time index, :process process, :type type, :f f, :value value})
+
 (deftest op->max-offsets-test
   (is (= {:x 5 :y 3}
          (op->max-offsets {:type :ok,
@@ -72,24 +77,31 @@
 
 (deftest g1a-test
   ; If we can observe a failed write, we have a case of G1a.
-  (let [send {:index 0, :type :fail, :f :send, :value [[:send :x 2] [:send :y 3]]}
-        poll {:index 1, :type :ok,   :f :poll, :value [[:poll {:x [[0 2] [1 3]]}]]}]
-    (is (= [{:op    poll
+  (let [send  (o 0 0 :invoke :send [[:send :x 2] [:send :y 3]])
+        send' (o 1 0 :fail   :send [[:send :x 2] [:send :y 3]])
+        poll  (o 2 1 :invoke :poll [[:poll]])
+        poll' (o 3 1 :ok     :poll [[:poll {:x [[0 2] [1 3]]}]])]
+    (is (= [{:op    poll'
              :key   :x
              :value 2}]
-           (-> [send poll] analysis :errors :g1a)))))
+           (-> [send send' poll poll'] analysis :errors :g1a)))))
 
 (deftest lost-update-test
   (testing "consistent"
     ; We submit a at offset 0, b at offset 1, and d at offset 3. A read observes
     ; c at offset 2, which implies we should also have read a and b.
-    (let [send-a  {:type :ok, :f :send, :value [[:send :x [0 :a]]]}
-          send-bd {:type :ok, :f :send, :value [[:send :x [1 :b]]
-                                                [:send :x [3 :d]]]}
-          poll {:type :ok, :f :poll, :value [[:poll {:x [[2 :c]]}]]}]
+    (let [send-a   (o 0 0 :invoke :send [[:send :x :a]])
+          send-a'  (o 1 0 :ok     :send [[:send :x [0 :a]]])
+          send-bd  (o 2 0 :invoke :send [[:send :x :b] [:send :x :d]])
+          send-bd' (o 3 0 :ok     :send [[:send :x [1 :b]] [:send :x [3 :d]]])
+          send-c   (o 4 1 :invoke :send [[:send :x :c]])
+          send-c'  (o 5 1 :info   :send [[:send :x :c]])
+          poll     (o 6 0 :invoke :poll [[:poll]])
+          poll'    (o 7 0 :ok     :poll [[:poll {:x [[2 :c]]}]])]
       (is (= [{:key :x
                :lost [:a :b]}]
-             (-> [send-a send-bd poll] analysis :errors :lost-update)))))
+             (-> [send-a send-a' send-bd send-bd' send-c send-c' poll poll']
+                 analysis :errors :lost-update)))))
 
   (testing "inconsistent"
     ; Here, we have inconsistent offsets. a is submitted at offset 0, but gets
@@ -97,48 +109,73 @@
     ; means we *also* should have read a and b; however, b's offset could win
     ; when we compute the version order. To compensate, we need more than the
     ; final version order indexes.
-    (let [send-a {:type :ok, :f :send, :value [[:send :x [0 :a]]]}
-          send-bc {:type :ok, :f :send, :value [[:send :x [0 :b]]
-                                                [:send :x [2 :c]]]}
-          read-bc {:type :ok, :f :poll, :value [[:poll {:x [[0 :b] [2 :c]]}]]}]
+    (let [send-a   (o 0 0 :invoke :send [[:send :x :a]])
+          send-a'  (o 1 0 :ok     :send [[:send :x [0 :a]]])
+          send-bc  (o 2 0 :invoke :send [[:send :x :b] [:send :x :c]])
+          send-bc' (o 3 0 :ok     :send [[:send :x [0 :b]] [:send :x [2 :c]]])
+          read-bc  (o 4 0 :invoke :poll [[:poll]])
+          read-bc' (o 5 0 :ok     :poll [[:poll {:x [[0 :b] [2 :c]]}]])]
       (is (= [{:key :x
               :lost [:a]}]
-             (-> [send-a send-bc read-bc] analysis :errors :lost-update))))))
+             (-> [send-a send-a' send-bc send-bc' read-bc read-bc']
+                 analysis :errors :lost-update))))))
 
 (deftest poll-skip-test
   ; Process 0 observes offsets 1, 2, then 4, then 7, but we know 3 and 6
   ; existed due to other reads/writes. 5 might actually be a gap in the log.
-  (let [poll-1-2 {:process 0, :f :poll, :value [[:poll {:x [[1 :a], [2 :b]]}]]}
-        poll-4   {:process 0, :f :poll, :value [[:poll {:x [[4 :d]]}]]}
-        poll-7   {:process 0, :f :poll, :value [[:poll {:x [[7 :g]]}]]}
+  (let [poll-1-2  (o 0 0 :invoke :poll [[:poll]])
+        poll-1-2' (o 1 0 :ok     :poll [[:poll {:x [[1 :a], [2 :b]]}]])
+        poll-3    (o 2 1 :invoke :poll [[:poll]])
+        poll-3'   (o 3 1 :ok     :poll [[:poll {:x [[3 :c]]}]])
+        poll-4    (o 6 0 :invoke :poll [[:poll]])
+        poll-4'   (o 7 0 :ok     :poll [[:poll {:x [[4 :d]]}]])
         ; Reads and writes that let us know offsets 3 and 5 existed
-        poll-3   {:process 1, :f :poll, :value [[:poll {:x [[3 :c]]}]]}
-        write-6  {:process 2, :f :poll, :value [[:send :x [6 :f]]]}
+        write-6   (o 10 2 :invoke :send [[:send :x :f]])
+        write-6'  (o 11 2 :ok     :send [[:send :x [6 :f]]])
+        poll-7    (o 12 0 :invoke :poll [[:poll]])
+        poll-7'   (o 13 0 :ok     :poll [[:poll {:x [[7 :g]]}]])
+        ; Sends to fill in polls
+        write-*   (o 14 3 :invoke :send [[:send :x :a]
+                                         [:send :x :b]
+                                         [:send :x :c]
+                                         [:send :x :d]])
+        write-*'  (o 15 3 :info :send [[:send :x :a]
+                                       [:send :x :b]
+                                       [:send :x :c]
+                                       [:send :x :d]])
         errs [{:key :x
-               :ops [poll-1-2 poll-4]
+               :ops (deindex [poll-1-2' poll-4'])
                :delta 2
                :skipped [:c]}
               {:key :x
-               :ops [poll-4 poll-7]
+               :ops (deindex [poll-4' poll-7'])
                :delta 2
                :skipped [:f]}]
         nm (fn [history]
-             (when-let [ps (-> history analysis :errors :poll-skip)]
+             (when-let [es (-> history analysis :errors :poll-skip)]
                ; Strip off indices to simplify test cases
-               (map (fn [e] (update e :ops deindex)) ps)))]
-    (is (= errs (nm [poll-1-2 poll-3 poll-4 write-6 poll-7])))
+               (map (fn [e] (update e :ops deindex)) es)))]
+    (is (= errs (nm [poll-1-2 poll-1-2' poll-3 poll-3' poll-4 poll-4' write-6
+                     write-6' poll-7 poll-7' write-* write-*'])))
 
     ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
     ; include :x, we allow skips.
     (testing "with intermediate subscribe"
-      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
-            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
-            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
-            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
-        (is (nil? (nm [poll-1-2 poll-3 sub-y poll-4 assign-y write-6 poll-7])))
+      (let [sub-xy     (o 4 0 :invoke :subscribe [:x :y])
+            sub-xy'    (o 5 0 :ok     :subscribe [:x :y])
+            assign-xy  (o 8 0 :invoke :assign    [:x :y])
+            assign-xy' (o 9 0 :ok     :assign    [:x :y])
+            sub-y      (o 4 0 :invoke :subscribe [:y])
+            sub-y'     (o 5 0 :ok     :subscribe [:y])
+            assign-y   (o 8 0 :invoke :assign    [:y])
+            assign-y'  (o 9 0 :info   :assign    [:y])]
+        (is (nil? (nm [poll-1-2 poll-1-2' poll-3 poll-3' sub-y sub-y' poll-4
+                       poll-4' assign-y assign-y' write-6 write-6' poll-7
+                       poll-7' write-* write-*'])))
         ; But subscribes that still cover x, we preserve state
-        (is (= errs (nm [poll-1-2 poll-3 sub-xy poll-4
-                         assign-xy write-6 poll-7])))))))
+        (is (= errs (nm [poll-1-2 poll-1-2' poll-3 poll-3' sub-xy sub-xy'
+                         poll-4 poll-4' assign-xy assign-xy' write-6 write-6'
+                         poll-7 poll-7' write-* write-*'])))))))
 
 (deftest nonmonotonic-poll-test
   ; A nonmonotonic poll occurs when a single process performs two transactions,
@@ -182,32 +219,36 @@
   ; ordered at or before t2's last send in the log.
   ;
   ; Here process 0 sends offsets 3, 4, then sends 1, 2
-  (let [send-34 {:type :info, :process 0, :f :send, :value [[:send :x [3 :c]]
-                                                            [:send :x [4 :d]]]}
-        send-12 {:type :ok, :process 0, :f :send, :value [[:send :x [1 :a]]
-                                                          [:send :x [2 :b]]]}
+  (let [send-34  (o 0  0 :invoke :send [[:send :x :c] [:send :x :d]])
+        send-34' (o 1  0 :info   :send [[:send :x [3 :c]] [:send :x [4 :d]]])
+        send-12  (o 10 0 :invoke :send [[:send :x 1] [:send :x 2]])
+        send-12' (o 11 0 :ok     :send [[:send :x [1 :a]] [:send :x [2 :b]]])
         errs [{:key    :x
                :values [:d :a]
                :delta  -3
-               :ops    [send-34 send-12]}]
+               :ops    (deindex [send-34' send-12'])}]
         nm (fn [history]
              (when-let [es(-> history analysis :errors :nonmonotonic-send)]
                ; Strip off indices to simplify test cases
                (map (fn [e] (update e :ops deindex)) es)))]
-    (is (= errs (nm [send-34 send-12])))
+    (is (= errs (nm [send-34 send-34' send-12 send-12'])))
 
     ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
     ; include :x, we allow nonmonotonicity.
     (testing "with intermediate subscribe"
-      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
-            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
-            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
-            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
-        (is (nil? (nm [send-34 sub-y    send-12])))
-        (is (nil? (nm [send-34 assign-y send-12])))
+      (let [sub-xy     (o 2 0 :invoke :subscribe [:x :y])
+            sub-xy'    {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
+            assign-xy  (o 2 0 :invoke :assign [:x :y])
+            assign-xy' {:type :ok,   :process 0, :f :assign, :value [:x :y]}
+            sub-y      (o 2 0 :invoke :subscribe [:y])
+            sub-y'     {:type :ok,   :process 0, :f :subscribe, :value [:y]}
+            assign-y   (o 2 0 :invoke :assign [:y])
+            assign-y'  {:type :info, :process 0, :f :assign, :value [:y]}]
+        (is (nil? (nm [send-34 send-34' sub-y sub-y' send-12 send-12'])))
+        (is (nil? (nm [send-34 send-34' assign-y assign-y' send-12 send-12'])))
         ; But subscribes that still cover x, we preserve state
-        (is (= errs (nm [send-34 sub-xy    send-12])))
-        (is (= errs (nm [send-34 assign-xy send-12])))))))
+        (is (= errs (nm [send-34 send-34' sub-xy sub-xy' send-12 send-12'])))
+        (is (= errs (nm [send-34 send-34' assign-xy assign-xy' send-12 send-12'])))))))
 
 (deftest int-poll-skip-test
   ; An *internal poll skip* occurs when within the scope of a single
@@ -245,14 +286,18 @@
   ; Here a single op inserts mixed in with another. We know a's offset, but we
   ; don't know c's. A poll, however, tells us there exists a b between them,
   ; and that c's offset is 3.
-  (let [send-13 {:index 0, :type :ok, :f :send, :value [[:send :x [1 :a]] [:send :x :c]]}
-        poll-23 {:index 1, :type :ok, :f :poll, :value [[:poll {:x [[2 :b] [3 :c]]}]]}]
+  (let [send-13  (o 0 0 :invoke :send [[:send :x :a] [:send :x :c]])
+        send-13' (o 1 0 :ok     :send [[:send :x [1 :a]] [:send :x :c]])
+        send-b   (o 2 1 :invoke :send [[:send :x :b]])
+        send-b'  (o 3 1 :info   :send [[:send :x :b]])
+        poll-23  (o 4 2 :invoke :poll [[:poll]])
+        poll-23' (o 5 2 :ok     :poll [[:poll {:x [[2 :b] [3 :c]]}]])]
     (is (= [{:key     :x
              :values  [:a :c]
              :skipped [:b]
              :delta   2
-             :op      send-13}]
-           (-> [send-13 poll-23]
+             :op      send-13'}]
+           (-> [send-13 send-13' send-b send-b' poll-23 poll-23']
                analysis
                :errors
                :int-send-skip)))))
@@ -281,22 +326,26 @@
   ; transaction, where two calls to send() insert values in an order which
   ; contradicts the version order.
   (let [; In this case, the offsets are directly out of order.
-        send-31a {:index 0, :type :ok, :f :send, :value [[:send :x [3 :c]]
-                                                         [:send :x [1 :a]]]}
+        send-31a  (o 0 0 :invoke :send [[:send :x 3] [:send :x 1]])
+        send-31a' (o 1 0 :ok     :send [[:send :x [3 :c]] [:send :x [1 :a]]])
         ; Or we can infer the order contradiction from poll offsets
-        send-42b {:index 1, :type :info, :f :send, :value [[:send :y :d] [:send :y :b]]}
-        poll-42b {:index 2, :type :info, :f :poll, :value [[:poll {:y [[2 :b]
-                                                                       [3 :c]
-                                                                       [4 :d]]}]]}]
+        send-42b  (o 2 0 :invoke :send [[:send :y :d] [:send :y :b]])
+        send-42b' (o 3 0 :info   :send [[:send :y :d] [:send :y :b]])
+        ; c has to come from somewhere, too
+        send-3b   (o 4 1 :invoke :send [[:send :y :c]])
+        send-3b'  (o 5 1 :info   :send [[:send :y :c]])
+        ; This poll tells us b < d
+        poll-42b  (o 6 0 :invoke :poll [[:poll]])
+        poll-42b' (o 7 0 :info   :poll [[:poll {:y [[2 :b] [3 :c] [4 :d]]}]])]
     (is (= [{:key    :x
              :values [:c :a]
              :delta  -1
-             :op     send-31a}
+             :op     send-31a'}
             {:key    :y
              :values [:d :b]
              :delta  -2
-             :op     send-42b}]
-           (-> [send-31a send-42b poll-42b]
+             :op     send-42b'}]
+           (-> [send-31a send-31a' send-42b send-42b' send-3b send-3b' poll-42b poll-42b']
                analysis :errors :int-nonmonotonic-send)))))
 
 (deftest duplicate-test
@@ -305,12 +354,16 @@
   ; poll.
   (let [; Here we have a send operation which puts a to 1, and a poll which
         ; reads a at 3; it must have been at both.
-        send-a1 {:type :ok, :f :send, :value [[:send :x [1 :a]]]}
-        poll-a3 {:type :ok, :f :poll, :value [[:poll {:x [[2 :b] [3 :a]]}]]}]
+        send-a1  (o 0 0 :invoke :send [[:send :x :a]])
+        send-a1' (o 1 0 :ok     :send [[:send :x [1 :a]]])
+        send-b2  (o 2 1 :invoke :send [[:send :x :b]])
+        send-b2' (o 3 1 :info   :send [[:send :x :b]])
+        poll-a3  (o 4 2 :invoke :poll [[:poll]])
+        poll-a3' (o 5 2 :ok     :poll [[:poll {:x [[2 :b] [3 :a]]}]])]
     (is (= [{:key   :x
              :value :a
              :count 2}]
-           (-> [send-a1 poll-a3] analysis :errors :duplicate)))))
+           (-> [send-a1 send-a1' send-b2 send-b2' poll-a3 poll-a3'] analysis :errors :duplicate)))))
 
 (deftest realtime-lag-test
   (testing "up to date"
@@ -339,9 +392,9 @@
                   ; time 5; the lag is therefor 5.
                   (o 10 0 :invoke :poll [[:poll]])
                   (o 11 0 :ok     :poll [[:poll]])
-                  ; Let's read up to [1 :b], which was never written, but which
-                  ; we know was no longer the most recent value as soon as [2
-                  ; c] was written, at time 9. Now our lag is 12-9=3.
+                  ; Let's read up to [1 :b], which hasn't completed yet, but
+                  ; which we know was no longer the most recent value as soon
+                  ; as [2 c] was written, at time 9. Now our lag is 12-9=3.
                   (o 12 0 :invoke :poll [[:poll]])
                   (o 13 0 :ok     :poll [[:poll {:x [[0 :a] [1 :b]]}]])
                   ; If we re-assign process 0 to x, and read nothing, our most
@@ -365,6 +418,9 @@
                   (o 24 0 :invoke :poll [[:poll] [:poll]])
                   (o 25 0 :ok     :poll [[:poll {:x [[0 :a] [1 :b]]}]
                                          [:poll {:x [[2 :c] [3 :d]]}]])
+                  ; And write x b, which gets reordered to offset 1.
+                  (o 26 1 :invoke :send [[:send :x :b]])
+                  (o 27 1 :info   :send [[:send :x :b]])
                   ])]
       (testing realtime-lag
         (is (= [(l 2 0 :x 0)
@@ -380,15 +436,31 @@
                (:worst-realtime-lag (analysis history))))))))
 
 (deftest unseen-test
-  (is (= [{:time 0, :unseen {}}
-          {:time 1, :unseen {:x 2}}
-          {:time 2, :unseen {:x 1}}
-          {:time 3, :unseen {:x 0}}]
-         (-> [{:time 0, :type :ok, :f :poll, :value [[:poll {}]]}
-              {:time 1, :type :ok, :f :send, :value [[:send :x [0 :a]]
-                                                     [:send :x [1 :b]]]}
-              {:time 2, :type :ok, :f :poll, :value [[:poll {:x [[0 :a]]}]]}
-              {:time 3, :type :ok, :f :poll, :value [[:poll {:x [[1 :b]]}]]}
+  (is (= [{:time 1, :unseen {}}
+          {:time 3, :unseen {:x 2}}
+          {:time 5, :unseen {:x 1}}
+          {:time 7, :unseen {:x 0}, :messages {:x #{}}}]
+         (-> [(o 0 0 :invoke :poll [[:poll]])
+              (o 1 0 :ok     :poll [[:poll {}]])
+              (o 2 0 :invoke :send [[:send :x :a] [:send :x :b]])
+              (o 3 0 :ok     :send [[:send :x [0 :a]] [:send :x [1 :b]]])
+              (o 4 0 :invoke :poll [[:poll]])
+              (o 5 0 :ok     :poll [[:poll {:x [[0 :a]]}]])
+              (o 6 0 :invoke :poll [[:poll]])
+              (o 7 0 :ok     :poll [[:poll {:x [[1 :b]]}]])
               ]
              analysis
              :unseen))))
+
+(deftest ^:focus g0-test
+  ; Here, two transactions write an object to two different keys, and obtain
+  ; conflicting orders: a write cycle.
+  (let [wa  (o 0 0 :invoke :send [[:send :x :a] [:send :y :a]])
+        wb  (o 1 1 :invoke :send [[:send :x :b] [:send :y :b]])
+        wa' (o 2 0 :ok     :send [[:send :x [0 :a]] [:send :y [1 :a]]])
+        wb' (o 3 1 :ok     :send [[:send :x [1 :b]] [:send :y [0 :b]]])]
+    (is (= [{:type  :G0
+             :cycle [wa' wb' wa']
+             :steps [{:type :ww, :key :x, :value :a, :value' :b}
+                     {:type :ww, :key :y, :value :b, :value' :a}]}]
+           (-> [wa wb wa' wb'] analysis :errors :G0)))))

@@ -124,8 +124,12 @@
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
             [dom-top.core :refer [assert+ real-pmap loopr]]
-            [elle.list-append :refer [rand-bg-color]]
-            [gnuplot.core :as g]
+            [elle [core :as elle]
+                  [graph :as g]
+                  [list-append :refer [rand-bg-color]]
+                  [txn :as txn]
+                  [util :refer [index-of]]]
+            [gnuplot.core :as gnuplot]
             [hiccup.core :as h]
             [jepsen [checker :as checker]
                     [client :as client]
@@ -1142,6 +1146,7 @@
      :nonmonotonic  Go backwards (or stay in the same place) in the log}"
   [{:keys [history version-orders]}]
   (->> history
+       (remove (comp #{:invoke} :type))
        (mapcat (fn per-op [op]
                  ; Consider each pair of sends to a given key in this op...
                  (->> (for [[k vs]  (op-writes op)
@@ -1382,8 +1387,9 @@
           [(transient []) {} {}]
           history)
         out (persistent! out)]
-    (update out (dec (count out))
-            assoc :messages unseen)))
+    (when (seq out)
+      (update out (dec (count out))
+              assoc :messages unseen))))
 
 (defn plot-unseen!
   "Takes a test, a collection of unseen measurements, and options (e.g. those
@@ -1418,8 +1424,8 @@
                               (map (comp nanos->secs :time))
                               (map (fn [t]
                                      [:set :arrow
-                                      :from (g/list t [:graph 0])
-                                      :to   (g/list t [:graph 1])
+                                      :from (gnuplot/list t [:graph 0])
+                                      :to   (gnuplot/list t [:graph 1])
                                       :lc   :rgb "#F3974A"
                                       :lw   "1"
                                       :nohead])))
@@ -1717,6 +1723,87 @@
                    (spit path (h/html html)))))
          dorun)))
 
+(defn writer-of
+  "Takes a history and builds a map of keys to values to the completion
+  operation which attempted to write that value."
+  [history]
+  (loopr [writer-of (transient {})]
+         [op      (remove (comp #{:invoke} :type) history)
+          [k vs] (op-writes op)
+          v       vs]
+         (let [k-writer-of  (get writer-of k (transient {}))
+               k-writer-of' (assoc! k-writer-of v op)]
+           (recur (assoc! writer-of k k-writer-of')))
+         (map-vals persistent! (persistent! writer-of))))
+
+(defn previous-value
+  "Takes a version order for a key and a value. Returns the previous value in
+  the version order, or nil if either we don't know v2's index or v2 was the
+  first value in the version order."
+  [version-order v2]
+  (when-let [i2 (-> version-order :by-value (get v2))]
+    (when (< 0 i2)
+      (-> version-order :by-index (nth (dec i2))))))
+
+(defrecord WWExplainer [writer-of version-orders]
+  elle/DataExplainer
+  (explain-pair-data [_ a b]
+    (->> (for [[k vs] (op-writes b)
+               v2 vs]
+           (when-let [v1 (previous-value (version-orders k) v2)]
+             (if-let [writer (-> writer-of (get k) (get v1))]
+               (when (= a writer)
+                 {:type   :ww
+                  :key    k
+                  :value  v1
+                  :value' v2})
+               (throw+ {:type :no-writer-of-value, :key k, :value v1}))))
+         (remove nil?)
+         first))
+
+  (render-explanation [_ {:keys [key value value'] :as m} a-name b-name]
+    (str a-name " sent " (pr-str value) " to " (pr-str key)
+         " before " b-name " sent " (pr-str value'))))
+
+(defn ww-graph
+  "Analyzes a history to extract write-write dependencies. T1 < T2 iff T1 sends
+  some v1 to k and T2 sends some v2 to k and v1 < v2 in the version order."
+  [{:keys [writer-of version-orders]} history]
+  {:graph (loopr [g (g/linear (g/digraph))]
+                 [[k v->writer] writer-of ; For every key
+                  [v2 op2] v->writer]     ; And very value written in that key
+                 (let [version-order (get version-orders k)]
+                   (if-let [v1 (previous-value version-order v2)]
+                     (if-let [op1 (v->writer v1)]
+                       (recur (g/link g op1 op2 :ww))
+                       (throw+ {:type :no-writer-of-value, :key k, :value v1}))
+                     ; This is the first value in the version order.
+                     (recur g)))
+                 (g/forked g))
+   :explainer (WWExplainer. writer-of version-orders)})
+
+(defn graph
+  "A combined Elle dependency graph between completion operations."
+  [analysis history]
+  ((elle/combine (partial ww-graph analysis)
+                 ;(partial wr-graph analysis)
+                 ;(partial rw-graph analysis))
+                 )
+   history))
+
+(defn cycles
+  "Finds a map of cycle names to cyclic anomalies in a partial analysis."
+  [{:keys [history] :as analysis}]
+  ; Bit of a hack--our tests leave off :type fairly often, so we don't bother
+  ; running this analysis for those tests.
+  (when (:type (first history))
+    (let [opts     {:consistency-models [:strict-serializable]}
+          analyzer (->> opts
+                        txn/additional-graphs
+                        (into [(partial graph analysis)])
+                        (apply elle/combine))]
+      (:anomalies (txn/cycles! opts analyzer history)))))
+
 (defn analysis
   "Builds up intermediate data structures used to understand a history."
   [history]
@@ -1725,6 +1812,7 @@
         version-orders        (future (version-orders history))
         writes-by-type        (future (writes-by-type history))
         reads-by-type         (future (reads-by-type history))
+        writer-of             (future (writer-of history))
         ; Sort of a hack; we only bother computing this for "real" histories
         ; because our test suite often leaves off processes and times
         realtime-lag          (future
@@ -1736,6 +1824,7 @@
         version-order-errors  (:errors @version-orders)
         version-orders        (:orders @version-orders)
         analysis              {:history        history
+                               :writer-of      @writer-of
                                :writes-by-type @writes-by-type
                                :reads-by-type  @reads-by-type
                                :version-orders version-orders}
@@ -1746,6 +1835,7 @@
         int-poll-skip+nm-cases  (future (int-poll-skip+nonmonotonic-cases analysis))
         int-send-skip+nm-cases  (future (int-send-skip+nonmonotonic-cases analysis))
         duplicate-cases         (future (duplicate-cases analysis))
+        cycles                  (future (cycles analysis))
         poll-skip-cases         (:skip @poll-skip+nm-cases)
         nonmonotonic-poll-cases (:nonmonotonic @poll-skip+nm-cases)
         int-poll-skip-cases     (:skip @int-poll-skip+nm-cases)
@@ -1800,7 +1890,9 @@
 
                (seq (:unseen last-unseen))
                (assoc :unseen last-unseen)
-               )
+
+               true
+               (merge @cycles))
      :history            history
      :realtime-lag       @realtime-lag
      :worst-realtime-lag @worst-realtime-lag
