@@ -55,10 +55,7 @@
   ; See https://javadoc.io/doc/org.apache.kafka/kafka-clients/latest/org/apache/kafka/clients/consumer/ConsumerConfig.html
   ; And https://docs.confluent.io/platform/current/installation/configuration/consumer-configs.html
   (cond->
-    {ConsumerConfig/GROUP_ID_CONFIG
-     "jepsen_group"
-
-     ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
+    {ConsumerConfig/KEY_DESERIALIZER_CLASS_CONFIG
      "org.apache.kafka.common.serialization.LongDeserializer"
 
      ConsumerConfig/VALUE_DESERIALIZER_CLASS_CONFIG
@@ -91,13 +88,12 @@
      ConsumerConfig/CONNECTIONS_MAX_IDLE_MS_CONFIG
      60000
 
-
-     ; ConsumerConfig/ISOLATION_LEVEL_DOC
-     ; ???
-
      ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
      ; ???
      }
+    (:subscribe (:sub-via test))
+    (assoc ConsumerConfig/GROUP_ID_CONFIG "jepsen_group")
+
     (not= nil (:isolation-level opts))
     (assoc ConsumerConfig/ISOLATION_LEVEL_CONFIG (:isolation-level opts))
 
