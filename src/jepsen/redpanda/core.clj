@@ -257,6 +257,8 @@
 
    [nil "--[no-]idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."]
 
+   [nil "--isolation-level NAME" "What isolation level should we request for consumers? e.g. read_committed"]
+
    [nil "--max-writes-per-key LIMIT" "How many writes do we perform per key at most?"
     :default 1024
     :parse-fn parse-long
@@ -287,7 +289,7 @@
    [nil "--retries COUNT" "Producer retries. If omitted, uses client default."
     :parse-fn util/parse-long]
 
-   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --disable-server-auto-create-topics, --acks all, --default-topic-replications 3, --disable-server --retries 1000, --idempotence, --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
+   ["-s" "--safe" "Runs with the safest settings: --disable-auto-commit, --disable-server-auto-create-topics, --acks all, --default-topic-replications 3, --disable-server --retries 1000, --idempotence, --isolation-level read_committed --auto-offset-reset earliest, --sub-via assign. You can override individual settings by following -s with additional arguments, like so: -s --acks 0"
     :assoc-fn (fn [m _ _]
                 (assoc m
                        :default-topic-replications 3
@@ -295,6 +297,7 @@
                        :acks "all"
                        :retries 1000
                        :idempotence true
+                       :isolation-level "read_committed"
                        :auto-offset-reset "earliest"
                        :enable-server-auto-create-topics false
                        :sub-via #{:assign}))]
