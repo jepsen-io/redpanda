@@ -1,7 +1,9 @@
 (ns jepsen.redpanda.client
   "Wrapper for the Java Kafka client."
   (:require [clojure.tools.logging :refer [info warn]]
-            [jepsen.util :as util :refer [map-vals
+            [dom-top.core :as dt]
+            [jepsen.util :as util :refer [await-fn
+                                          map-vals
                                           pprint-str]]
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (java.time Duration)
@@ -13,7 +15,8 @@
            (org.apache.kafka.clients.consumer ConsumerConfig
                                               ConsumerRecord
                                               ConsumerRecords
-                                              KafkaConsumer)
+                                              KafkaConsumer
+                                              OffsetAndMetadata)
            (org.apache.kafka.clients.producer KafkaProducer
                                               ProducerConfig
                                               ProducerRecord)
@@ -91,7 +94,7 @@
      ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
      ; ???
      }
-    (:subscribe (:sub-via test))
+    (:subscribe (:sub-via opts))
     (assoc ConsumerConfig/GROUP_ID_CONFIG "jepsen_group")
 
     (not= nil (:isolation-level opts))
@@ -158,30 +161,6 @@
    ; Never retry
    AdminClientConfig/RETRIES_CONFIG                                0})
 
-(defn consumer
-  "Opens a new consumer for the given node."
-  [opts node]
-  (let [config (consumer-config node opts)]
-    (when (compare-and-set! consumer-config-logged? false true)
-      (info "Consumer config:\n" (pprint-str config)))
-    (KafkaConsumer. (->properties config))))
-
-(defn producer
-  "Opens a new producer for a node."
-  [opts node]
-  (let [config (producer-config node opts)]
-    (when (compare-and-set! producer-config-logged? false true)
-      (info "Producer config:\n" (pprint-str config)))
-    (let [p (KafkaProducer. (->properties config))]
-      (when (:transactional-id opts)
-        (.initTransactions p))
-      p)))
-
-(defn admin
-  "Opens an admin client for a node."
-  [test node]
-  (Admin/create (->properties (admin-config node))))
-
 (defn ^Duration ms->duration
   "Constructs a Duration from millis."
   [ms]
@@ -196,6 +175,47 @@
   "Closes a producer *immediately*, without waiting for incomplete requests."
   [^KafkaProducer p]
   (.close p (ms->duration 0)))
+
+(defn consumer
+  "Opens a new consumer for the given node."
+  [opts node]
+  (let [config (consumer-config node opts)]
+    (when (compare-and-set! consumer-config-logged? false true)
+      (info "Consumer config:\n" (pprint-str config)))
+    (KafkaConsumer. (->properties config))))
+
+(defn producer*
+  "Opens a new producer for a node. Doesn't initialize transactions."
+  [opts node]
+  (let [config (producer-config node opts)]
+    (when (compare-and-set! producer-config-logged? false true)
+      (info "Producer config:\n" (pprint-str config)))
+    (KafkaProducer. (->properties config))))
+
+(defn producer
+  "Opens a new producer for a node. Automatically initializes transactions, if
+  :transactional-id opts is set."
+  [opts node]
+  (if-not (:transactional-id opts)
+    (producer* opts node)
+    ; initTransactions loves to explode for nondetermistic (possibly
+    ; server-specific?) reasons, and when it does the entire producer winds up
+    ; locked in an irrecoverable state, so we have to do this akward
+    ; open-init-close dance
+    (await-fn (fn init-txns []
+                (let [p (producer* opts node)]
+                  (try (.initTransactions p)
+                       p
+                       (catch Throwable t
+                         (close-producer! p)
+                         (throw t)))))
+              {:log-interval 5000
+               :log-message "Waiting for initTransactions()"})))
+
+(defn admin
+  "Opens an admin client for a node."
+  [test node]
+  (Admin/create (->properties (admin-config node))))
 
 (defn create-topic!
   "Creates a new topic using an admin client. Synchronous. If the topic already
@@ -221,6 +241,11 @@
   "Constructs a ProducerRecord from a topic, partition, key, and value."
   [topic partition key value]
   (ProducerRecord. topic (int partition) key value))
+
+(defn ^OffsetAndMetadata offset+metadata
+  "Constructs an OffsetAndMetadata."
+  [^long offset]
+  (OffsetAndMetadata. offset))
 
 (defn subscribe!
   "Subscribes to the given set of topics."
@@ -275,6 +300,7 @@
   [& body]
   `(try ~@body
         (catch ExecutionException e#
+          (throw e#)
           (let [cause# (util/ex-root-cause e#)]
             (if (instance? KafkaException cause#)
               (throw cause#)

@@ -154,12 +154,15 @@
                                               RecordMetadata)
            (org.apache.kafka.common KafkaException
                                     TopicPartition)
-           (org.apache.kafka.common.errors DisconnectException
+           (org.apache.kafka.common.errors AuthorizationException
+                                           DisconnectException
                                            InvalidTopicException
                                            InvalidReplicationFactorException
                                            NetworkException
                                            NotControllerException
                                            NotLeaderOrFollowerException
+                                           OutOfOrderSequenceException
+                                           ProducerFencedException
                                            TimeoutException
                                            UnknownTopicOrPartitionException
                                            UnknownServerException
@@ -262,6 +265,71 @@
             ; And record offset and value.
             [f k' [offset v]])))
 
+(defn send-offsets!
+  "Takes a client and a completed txn operation. Finds the highest polled
+  offsets from that op's :value, and calls .sendOffsetsToTransaction on the
+  producer."
+  [client op]
+  (loopr [offsets {}] ; Map of key to offset.
+         [[_ poll]       (->> op :value (filter (comp #{:poll} first)))
+          [k pairs]      poll
+          [offset value] pairs]
+         (recur (update offsets k (fnil max ##-Inf) offset))
+         ; Convert that to topic-partitions -> OffsetAndMetadata
+         (let [kafka-offsets (->> (for [[k offset] offsets]
+                                    [(k->topic-partition k)
+                                     ; Note that we need to send the *next*
+                                     ; offset, not the one we observed.
+                                     (rc/offset+metadata (inc offset))])
+                                  (into {}))
+               consumer-group-id "jepsen_group"] ; TODO: change this?
+           (when-not (empty? offsets)
+             (info :send-offsets consumer-group-id offsets)
+             (.sendOffsetsToTransaction ^KafkaProducer (:producer client)
+                                        kafka-offsets
+                                        consumer-group-id)))))
+
+(defmacro with-txn
+  "Takes a test, a client, an operation, and a body. If (:txn test) is false,
+  evaluates body. If (:txn) test is true, evaluates body in a transaction:
+  beginning the transaction before the body begins, committing the transaction
+  once the body completes, and handling errors appropriately.
+
+  Expects the body to produce a completed version of op. Parses op to identify
+  the highest observed offset for each poll, and sends those offsets to the
+  transaction coordinator.
+
+  If the body throws a fencing/auth/order error, returns a :type :info version
+  of op, which forces the client to tear down the producer and create a new
+  one.
+
+  TODO: this isn't entirely what we want, because these might be definite
+  errors and now we're recording them as indefinite, but it feels safer to
+  force a full process crash because a lot of our analysis assumes processes
+  are 1:1 with consumers/producers. Maybe later we should close/reopen the
+  producer and wrap it in an atom?
+
+  For all other errors, aborts the transaction and throws."
+  [test client op & body]
+  `(try (when (:txn ~test)
+          (.beginTransaction ^KafkaProducer (:producer ~client)))
+        (let [op'# (do ~@body)]
+          (when (:txn ~test)
+            (send-offsets! ~client op'#)
+            (.commitTransaction ^KafkaProducer (:producer ~client)))
+          op'#)
+        (catch ProducerFencedException e#
+          (assoc ~op :type :info, :error :producer-fenced))
+        (catch OutOfOrderSequenceException e#
+          (assoc ~op :type :info, :error :out-of-order-sequence))
+        (catch AuthorizationException e#
+          (assoc ~op :type :info, :error :authorization))
+        (catch RuntimeException e#
+          (when (:txn ~test)
+            (info e# "Aborting transaction")
+            (.abortTransaction ^KafkaProducer (:producer ~client)))
+          (throw e#))))
+
 (defrecord Client [; What node are we bound to?
                    node
                    ; Our three Kafka clients
@@ -273,13 +341,17 @@
                    extant-topics]
   client/Client
   (open! [this test node]
-    (let [tx-id (rc/new-transactional-id)]
+    (let [tx-id    (rc/new-transactional-id)
+          producer (rc/producer
+                     (if (:txn test)
+                       (assoc test :transactional-id tx-id)
+                       test)
+                     node)]
       (assoc this
              :node      node
              :admin     (rc/admin test node)
-;             :producer  (rc/producer (assoc test :transactional-id tx-id) node)
-             :producer  (rc/producer test node)
-             :consumer  (rc/consumer test node))))
+             :consumer  (rc/consumer test node)
+             :producer  producer)))
 
   (setup! [this test])
 
@@ -323,79 +395,70 @@
 
       ; Apply poll/send transactions
       (:poll, :send, :txn)
-      (let [; How should we interpret the operation completion :type when a
-            ; single micro-op definitely fails?
-            mop-fail-type (if (= 1 (count (:value op)))
-                            ; If we only tried a single mop, we can just fail
-                            ; the whole op.
-                            :fail
-                            ; TODO: when we do transactions, the failure of any
-                            ; single mop can be safely interpreted as a :fail
-                            ; of the entire op, since all mops should fail to
-                            ; commit as a unit. Without txns, these should be
-                            ; info, because earlier writes may have committed.
-                            :info)]
-        (try+
+      (try+
+        (with-txn test this op
           (rc/unwrap-errors
-            ;(.beginTransaction producer)
             (let [txn  (:value op)
                   txn' (mapv (partial mop! this (:poll-ms op poll-ms)) txn)]
               ; If we read, AND we're using :subscribe instead of assign,
-              ; commit offsets. My understanding is that with assign you're not
-              ; supposed to use the offset system?
+              ; commit offsets. My understanding is that with assign you're
+              ; not supposed to use the offset system?
+              ;
+              ; Also note that per
+              ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
+              ; commitSync is more intended for non-transactional workflows.
               (when (and (#{:poll :txn} (:f op))
+                         (not (:txn test))
                          (:subscribe (:sub-via test)))
                 (try (.commitSync consumer)
                      ; If we crash during commitSync *outside* a transaction,
                      ; it might be that we poll()ed some values in this txn
-                     ; which Kafka will think we consumed. We won't have
-                     ; any record of them if we fail the txn. Instead, we
-                     ; return an :ok txn *with* the reads, but note the lack of
+                     ; which Kafka will think we consumed. We won't have any
+                     ; record of them if we fail the txn. Instead, we return
+                     ; an :ok txn *with* the reads, but note the lack of
                      ; commit.
                      (catch RuntimeException e
                        (assoc op :type :ok, :value txn',
                               :error [:consumer-commit (.getMessage e)]))))
-              ; TODO: enable txns, write some kind of macro for commit/abort.
-              ;(.commitTransaction producer)
-              ;(.abortTransaction producer)
-              (assoc op :type :ok, :value txn')))
-          (catch DisconnectException e
-            (assoc op :type :info, :error [:disconnect (.getMessage e)]))
+              (assoc op :type :ok, :value txn'))))
+        (catch DisconnectException e
+          (assoc op :type :info, :error [:disconnect (.getMessage e)]))
 
-          (catch InvalidTopicException _
-            (assoc op :type mop-fail-type, :error :invalid-topic))
+        (catch InvalidTopicException _
+          (assoc op :type :fail, :error :invalid-topic))
 
-          (catch InvalidReplicationFactorException _
-            (assoc op :type mop-fail-type :error :invalid-replication-factor))
+        (catch InvalidReplicationFactorException _
+          (assoc op :type :fail :error :invalid-replication-factor))
 
-          (catch NetworkException e
-            (assoc op :type :info, :error [:network (.getMessage e)]))
+        (catch NetworkException e
+          (assoc op :type :info, :error [:network (.getMessage e)]))
 
-          (catch NotControllerException e
-            (assoc op :type mop-fail-type, :error :not-controller))
+        (catch NotControllerException e
+          (assoc op :type :fail, :error :not-controller))
 
-          (catch NotLeaderOrFollowerException _
-            (assoc op :type mop-fail-type, :error :not-leader-or-follower))
+        (catch NotLeaderOrFollowerException _
+          ; This is, surprisingly enough, an indefinite failure.
+          (assoc op :type :info, :error :not-leader-or-follower))
 
-          (catch UnknownTopicOrPartitionException _
-            (assoc op :type mop-fail-type, :error :unknown-topic-or-partition))
+        (catch UnknownTopicOrPartitionException _
+          (assoc op :type :fail, :error :unknown-topic-or-partition))
 
-          (catch UnknownServerException e
-            (assoc op :type :info, :error [:unknown-server-exception
-                                           (.getMessage e)]))
+        (catch UnknownServerException e
+          (assoc op :type :info, :error [:unknown-server-exception
+                                         (.getMessage e)]))
 
-          (catch TimeoutException _
-            (assoc op :type :info, :error :timeout))
+        (catch TimeoutException _
+          (assoc op :type :info, :error :timeout))
 
-          (catch KafkaException e
-            (condp re-find (.getMessage e)
-              #"broker is not available"
-              (assoc op :type mop-fail-type, :error :broker-not-available)
+        (catch KafkaException e
+          (condp re-find (.getMessage e)
+            #"broker is not available"
+            (assoc op :type :fail, :error :broker-not-available)
 
-              (throw e)))
+            (throw e)))
 
-          (catch [:type :timeout] e
-            (assoc op :type :info, :error :timeout))))))
+        (catch [:type :timeout] e
+          (assoc op :type :info, :error :timeout)))))
 
   (teardown! [this test])
 
@@ -570,7 +633,9 @@
       (->> [{:f :crash}
             {:f :debug-topic-partitions, :value (keys offsets)}
             {:f :assign, :value (keys offsets)}
-            (repeat {:f :poll, :value [[:poll]], :poll-ms 1000})]
+            (->> {:f :poll, :value [[:poll]], :poll-ms 1000}
+                 repeat
+                 (gen/stagger 1/5))]
            (gen/time-limit 10000)
            repeat
            (FinalPolls. offsets)))))
@@ -2010,7 +2075,7 @@
   (let [workload (append/test
                    (assoc opts
                           ; TODO: don't hardcode these
-                          :max-txn-length 1))
+                          :max-txn-length (if (:txn opts) 4 1)))
         max-offsets (atom (sorted-map))]
     (assoc workload
            :client          (client)

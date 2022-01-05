@@ -119,7 +119,7 @@
       ; If Redpanda creates a topic automatically, it might be under-replicated
       (let [e (:enable-server-auto-create-topics test)]
         (when-not (nil? e)
-          (info "Setting redpanda.auto_create_topics_enabled" e)
+          ;(info "Setting redpanda.auto_create_topics_enabled" e)
           (rpk! :config :set "redpanda.auto_create_topics_enabled" false)))
 
       ; Redpanda's internal topic kafka_internal/group/0 only has replication
@@ -127,13 +127,18 @@
       ; tolerance for consumer groups.
       (let [r (:default-topic-replications test)]
         (when-not (nil? r)
-          (info "Setting default-topic_replications" r)
+          ;(info "Setting default-topic_replications" r)
           (rpk! :config :set "redpanda.default_topic_replications" r)))
 
       ; Set up idempotence
       (when (:server-idempotence test)
         (rpk! :config :set :redpanda.id_allocator_replication 3)
         (rpk! :config :set :redpanda.enable_idempotence true))
+
+      ; And transactions
+      (when (:txn test)
+        (rpk! :config :set :redpanda.transaction_coordinator_replication 3)
+        (rpk! :config :set :redpanda.enable_transactions true))
 
       (rpk! :config :bootstrap
             :--id     id
