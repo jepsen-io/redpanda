@@ -136,6 +136,7 @@
                     [generator :as gen]
                     [store :as store]
                     [util :as util :refer [map-vals
+                                           meh
                                            nanos->secs
                                            parse-long
                                            pprint-str]]]
@@ -1908,13 +1909,14 @@
                  )
    history))
 
-(defn cycles
+(defn cycles!
   "Finds a map of cycle names to cyclic anomalies in a partial analysis."
-  [{:keys [history] :as analysis}]
+  [{:keys [history directory] :as analysis}]
   ; Bit of a hack--our tests leave off :type fairly often, so we don't bother
   ; running this analysis for those tests.
   (when (:type (first history))
-    (let [opts     {:consistency-models [:strict-serializable]}
+    (let [opts     {:consistency-models [:strict-serializable]
+                    :directory directory}
           analyzer (->> opts
                         txn/additional-graphs
                         (into [(partial graph analysis)])
@@ -1922,8 +1924,13 @@
       (:anomalies (txn/cycles! opts analyzer history)))))
 
 (defn analysis
-  "Builds up intermediate data structures used to understand a history."
-  [history]
+  "Builds up intermediate data structures used to understand a history. Options
+  include:
+
+  :directory - Used for generating output files"
+  ([history]
+   (analysis history {}))
+  ([history opts]
   (let [history               (history/index history)
         history               (remove (comp #{:nemesis} :process) history)
         version-orders        (future (version-orders history))
@@ -1941,12 +1948,13 @@
         unseen                (future (unseen history))
         version-order-errors  (:errors @version-orders)
         version-orders        (:orders @version-orders)
-        analysis              {:history        history
-                               :writer-of      @writer-of
-                               :readers-of     @readers-of
-                               :writes-by-type @writes-by-type
-                               :reads-by-type  @reads-by-type
-                               :version-orders version-orders}
+        analysis              (assoc opts
+                                     :history        history
+                                     :writer-of      @writer-of
+                                     :readers-of     @readers-of
+                                     :writes-by-type @writes-by-type
+                                     :reads-by-type  @reads-by-type
+                                     :version-orders version-orders)
         g1a-cases               (future (g1a-cases analysis))
         lost-update-cases       (future (lost-update-cases analysis))
         poll-skip+nm-cases      (future (poll-skip+nonmonotonic-cases analysis))
@@ -1954,7 +1962,7 @@
         int-poll-skip+nm-cases  (future (int-poll-skip+nonmonotonic-cases analysis))
         int-send-skip+nm-cases  (future (int-send-skip+nonmonotonic-cases analysis))
         duplicate-cases         (future (duplicate-cases analysis))
-        cycles                  (future (cycles analysis))
+        cycles                  (future (cycles! analysis))
         poll-skip-cases         (:skip @poll-skip+nm-cases)
         nonmonotonic-poll-cases (:nonmonotonic @poll-skip+nm-cases)
         int-poll-skip-cases     (:skip @int-poll-skip+nm-cases)
@@ -2016,7 +2024,7 @@
      :realtime-lag       @realtime-lag
      :worst-realtime-lag @worst-realtime-lag
      :unseen             @unseen
-     :version-orders     version-orders}))
+     :version-orders     version-orders})))
 
 (defn condense-error
   "Takes a test and a  pair of an error type (e.g. :lost-update) and a seq of
@@ -2037,6 +2045,9 @@
         errs
         (case type
           :duplicate             (take 32      (sort-by :count errs))
+          (:G0, :G0-process, :G0-realtime,
+           :G1c, :G1c-process, :G1c-realtime)
+          (take 8  (sort-by (comp count :steps) errs))
           :inconsistent-offsets  (take 32 (sort-by (comp count :values) errs))
           :int-nonmonotonic-poll (take 8       (sort-by :delta errs))
           :int-nonmonotonic-send (take 8       (sort-by :delta errs))
@@ -2051,10 +2062,12 @@
   []
   (reify checker/Checker
     (check [this test history opts]
-      (let [{:keys [errors
+      (let [dir (store/path! test)
+            {:keys [errors
                     realtime-lag
                     worst-realtime-lag
-                    unseen] :as analysis} (analysis history)]
+                    unseen] :as analysis}
+            (analysis history {:directory dir})]
         ; Render plots
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
