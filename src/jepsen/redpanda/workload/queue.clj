@@ -1855,7 +1855,9 @@
                  (let [version-order (get version-orders k)]
                    (if-let [v1 (previous-value version-order v2)]
                      (if-let [op1 (v->writer v1)]
-                       (recur (g/link g op1 op2 :ww))
+                       (if (= op1 op2)
+                         g
+                         (recur (g/link g op1 op2 :ww)))
                        (throw+ {:type :no-writer-of-value, :key k, :value v1}))
                      ; This is the first value in the version order.
                      (recur g)))
@@ -1888,7 +1890,8 @@
                  [[k v->readers] readers-of
                   [v readers]    v->readers]
                  (if-let [writer (-> writer-of (get k) (get v))]
-                   (recur (g/link-to-all g writer readers :wr))
+                   (let [readers (remove #{writer} readers)]
+                     (recur (g/link-to-all g writer readers :wr)))
                    (throw+ {:type :no-writer-of-value, :key k, :value v}))
                  (g/forked g))
    :explainer (WRExplainer. writer-of)})
