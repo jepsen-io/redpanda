@@ -321,7 +321,11 @@
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword
     :default  :list-append
-    :validate [workloads (cli/one-of workloads)]]])
+    :validate [workloads (cli/one-of workloads)]]
+
+  [nil "--[no-]ww-deps" "Enables or disables support for write-write dependency inference based on offsets in the queue workload. Redpanda allows write cycles everywhere. Disabling ww edges is helpful in hunting for pure wr cycles."
+   :default true]
+])
 
 (def test-all-cli-opts
   "Additional options for test-all"

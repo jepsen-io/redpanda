@@ -1876,20 +1876,26 @@
 (defn ww-graph
   "Analyzes a history to extract write-write dependencies. T1 < T2 iff T1 sends
   some v1 to k and T2 sends some v2 to k and v1 < v2 in the version order."
-  [{:keys [writer-of version-orders]} history]
-  {:graph (loopr [g (g/linear (g/digraph))]
-                 [[k v->writer] writer-of ; For every key
-                  [v2 op2] v->writer]     ; And very value written in that key
-                 (let [version-order (get version-orders k)]
-                   (if-let [v1 (previous-value version-order v2)]
-                     (if-let [op1 (v->writer v1)]
-                       (if (= op1 op2)
-                         g
-                         (recur (g/link g op1 op2 :ww)))
-                       (throw+ {:type :no-writer-of-value, :key k, :value v1}))
-                     ; This is the first value in the version order.
-                     (recur g)))
-                 (g/forked g))
+  [{:keys [writer-of version-orders ww-deps]} history]
+  {:graph (if-not ww-deps
+            ; We might ask not to infer ww dependencies, in which case this
+            ; graph is empty.
+            (g/digraph)
+            (loopr [g (g/linear (g/digraph))]
+                   [[k v->writer] writer-of ; For every key
+                    [v2 op2] v->writer]     ; And very value written in that key
+                   (let [version-order (get version-orders k)]
+                     (if-let [v1 (previous-value version-order v2)]
+                       (if-let [op1 (v->writer v1)]
+                         (if (= op1 op2)
+                           g
+                           (recur (g/link g op1 op2 :ww)))
+                         (throw+ {:type   :no-writer-of-value
+                                  :key    k
+                                  :value  v1}))
+                       ; This is the first value in the version order.
+                       (recur g)))
+                   (g/forked g)))
    :explainer (WWExplainer. writer-of version-orders)})
 
 (defrecord WRExplainer [writer-of]
@@ -1958,7 +1964,9 @@
   "Builds up intermediate data structures used to understand a history. Options
   include:
 
-  :directory - Used for generating output files"
+  :directory - Used for generating output files
+  :ww-deps   - Whether to perform write-write inference on the basis of log
+               offsets."
   ([history]
    (analysis history {}))
   ([history opts]
@@ -2098,7 +2106,8 @@
                     realtime-lag
                     worst-realtime-lag
                     unseen] :as analysis}
-            (analysis history {:directory dir})]
+            (analysis history {:directory dir
+                               :ww-deps   (:ww-depts test)})]
         ; Render plots
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
