@@ -327,7 +327,10 @@
         (catch RuntimeException e#
           (when (:txn ~test)
             (info e# "Aborting transaction")
-            (.abortTransaction ^KafkaProducer (:producer ~client)))
+            ; AbortTransaction loves to throw, which sort of masks the original
+            ; cause of the abort. I don't understand why we even HAVE an abort
+            ; call if it can fail so often!
+            (meh (.abortTransaction ^KafkaProducer (:producer ~client))))
           (throw e#))))
 
 (defrecord Client [; What node are we bound to?
