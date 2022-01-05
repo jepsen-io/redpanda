@@ -300,7 +300,9 @@
   [& body]
   `(try ~@body
         (catch ExecutionException e#
-          (throw e#)
+          ; For debugging cases where the root exception gives us
+          ; zero stacktrace info
+          ; (throw e#)
           (let [cause# (util/ex-root-cause e#)]
             (if (instance? KafkaException cause#)
               (throw cause#)

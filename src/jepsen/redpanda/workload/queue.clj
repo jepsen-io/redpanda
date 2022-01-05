@@ -1829,6 +1829,28 @@
     (when (< 0 i2)
       (-> version-order :by-index (nth (dec i2))))))
 
+(defn mop-index
+  "Takes an operation, a function f (:poll or :send), a key k, and a value v.
+  Returns the index (0, 1, ...) within that operation's value which performed
+  that poll or send, or nil if none could be found."
+  [op f k v]
+  (loopr [i         0
+          mop-index nil]
+         [[fun a b] (:value op)]
+         (if mop-index
+           (recur i mop-index)
+           (if (and (= f fun)
+                    (case f
+                      :send (and (= k a)
+                                 (if (vector? b)
+                                   (= v (second b))
+                                   (= v b)))
+                      :poll (when-let [pairs (get a k)]
+                              (some (comp #{v} second) pairs))))
+             (recur (inc i) i)
+             (recur (inc i) mop-index)))
+         mop-index))
+
 (defrecord WWExplainer [writer-of version-orders]
   elle/DataExplainer
   (explain-pair-data [_ a b]
@@ -1840,7 +1862,9 @@
                  {:type   :ww
                   :key    k
                   :value  v1
-                  :value' v2})
+                  :value' v2
+                  :a-mop-index (mop-index a :send k v1)
+                  :b-mop-index (mop-index b :send k v2)})
                (throw+ {:type :no-writer-of-value, :key k, :value v1}))))
          (remove nil?)
          first))
@@ -1877,7 +1901,9 @@
              (when (= a writer)
                {:type  :wr
                 :key   k
-                :value v})
+                :value v
+                :a-mop-index (mop-index a :send k v)
+                :b-mop-index (mop-index b :poll k v)})
              (throw+ {:type :no-writer-of-value, :key k, :value v})))
          (remove nil?)
          first))
@@ -1916,7 +1942,12 @@
   ; running this analysis for those tests.
   (when (:type (first history))
     (let [opts     {:consistency-models [:strict-serializable]
-                    :directory directory}
+                    :directory (str directory "/elle")}
+          ; For our purposes, we only want to infer cycles over txn/poll/send
+          ; ops
+          history  (->> history
+                        (filter (comp #{:txn :poll :send} :f))
+                        vec)
           analyzer (->> opts
                         txn/additional-graphs
                         (into [(partial graph analysis)])

@@ -80,7 +80,7 @@
   (let [send  (o 0 0 :invoke :send [[:send :x 2] [:send :y 3]])
         send' (o 1 0 :fail   :send [[:send :x 2] [:send :y 3]])
         poll  (o 2 1 :invoke :poll [[:poll]])
-        poll' (o 3 1 :ok     :poll [[:poll {:x [[0 2] [1 3]]}]])]
+        poll' (o 3 1 :ok     :poll [[:poll {:x [[0 2]]}]])]
     (is (= [{:op    poll'
              :key   :x
              :value 2}]
@@ -129,7 +129,7 @@
         poll-3'   (o 3 1 :ok     :poll [[:poll {:x [[3 :c]]}]])
         poll-4    (o 6 0 :invoke :poll [[:poll]])
         poll-4'   (o 7 0 :ok     :poll [[:poll {:x [[4 :d]]}]])
-        ; Reads and writes that let us know offsets 3 and 5 existed
+        ; Reads and writes that let us know offsets 6 and 7 existed
         write-6   (o 10 2 :invoke :send [[:send :x :f]])
         write-6'  (o 11 2 :ok     :send [[:send :x [6 :f]]])
         poll-7    (o 12 0 :invoke :poll [[:poll]])
@@ -138,11 +138,13 @@
         write-*   (o 14 3 :invoke :send [[:send :x :a]
                                          [:send :x :b]
                                          [:send :x :c]
-                                         [:send :x :d]])
+                                         [:send :x :d]
+                                         [:send :x :g]])
         write-*'  (o 15 3 :info :send [[:send :x :a]
                                        [:send :x :b]
                                        [:send :x :c]
-                                       [:send :x :d]])
+                                       [:send :x :d]
+                                       [:send :x :g]])
         errs [{:key :x
                :ops (deindex [poll-1-2' poll-4'])
                :delta 2
@@ -461,8 +463,10 @@
         wb' (o 3 1 :ok     :send [[:send :x [1 :b]] [:send :y [0 :b]]])]
     (is (= [{:type  :G0
              :cycle [wa' wb' wa']
-             :steps [{:type :ww, :key :x, :value :a, :value' :b}
-                     {:type :ww, :key :y, :value :b, :value' :a}]}]
+             :steps [{:type :ww, :key :x, :value :a, :value' :b,
+                      :a-mop-index 0, :b-mop-index 0}
+                     {:type :ww, :key :y, :value :b, :value' :a
+                      :a-mop-index 1, :b-mop-index 1}]}]
            (-> [wa wb wa' wb'] analysis :errors :G0)))))
 
 (deftest g1c-pure-wr-test
@@ -473,8 +477,10 @@
         t2' (o 3 1 :ok :txn [[:send :y [0 :b]] [:poll {:x [[0 :a]]}]])]
     (is (= [{:type :G1c
              :cycle [t1' t2' t1']
-             :steps [{:type :wr, :key :x, :value :a}
-                     {:type :wr, :key :y, :value :b}]}]
+             :steps [{:type :wr, :key :x, :value :a
+                      :a-mop-index 0, :b-mop-index 1}
+                     {:type :wr, :key :y, :value :b,
+                      :a-mop-index 0, :b-mop-index 1}]}]
            (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))
 
 (deftest g1c-ww-wr-test
@@ -486,6 +492,8 @@
         t2' (o 3 1 :ok     :txn [[:poll {:x [[0 :a]]}]  [:send :y [1 :b]]])]
     (is (= [{:type :G1c
              :cycle [t1' t2' t1']
-             :steps [{:type :wr, :key :x, :value :a}
-                     {:type :ww, :key :y, :value :b, :value' :c}]}]
+             :steps [{:type :wr, :key :x, :value :a,
+                      :a-mop-index 0, :b-mop-index 0}
+                     {:type :ww, :key :y, :value :b, :value' :c,
+                      :a-mop-index 1, :b-mop-index 1}]}]
            (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))
