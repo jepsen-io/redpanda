@@ -490,6 +490,9 @@
             #"Unexpected error in AddOffsetsToTxnResponse"
             (assoc op :type :fail, :error [:add-offsets (.getMessage e)])
 
+            #"Unexpected error in TxnOffsetCommitResponse"
+            (assoc op :type :info, :error [:txn-offset-commit (.getMessage e)])
+
             #"Unhandled error in EndTxnResponse"
             (assoc op :type :info, :error [:end-txn (.getMessage e)])
 
