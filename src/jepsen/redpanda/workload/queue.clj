@@ -1883,6 +1883,13 @@
     (str a-name " sent " (pr-str value) " to " (pr-str key)
          " before " b-name " sent " (pr-str value'))))
 
+; A trivial explainer which refuses to acknowledge any connection between
+; things.
+(defrecord NeverExplainer []
+  elle/DataExplainer
+  (explain-pair-data [_ a b] nil)
+  (render-explanation [_ _ _ _] nil))
+
 (defn ww-graph
   "Analyzes a history to extract write-write dependencies. T1 < T2 iff T1 sends
   some v1 to k and T2 sends some v2 to k and v1 < v2 in the version order."
@@ -1906,7 +1913,9 @@
                        ; This is the first value in the version order.
                        (recur g)))
                    (g/forked g)))
-   :explainer (WWExplainer. writer-of version-orders)})
+   :explainer (if-not ww-deps
+                (NeverExplainer.)
+                (WWExplainer. writer-of version-orders))})
 
 (defrecord WRExplainer [writer-of]
   elle/DataExplainer
