@@ -364,8 +364,12 @@
   (invoke! [this test op]
     (case (:f op)
       ; Assign this consumer new topic-partitions
-      :assign (do (.assign consumer (map k->topic-partition (:value op)))
-                  (assoc op :type :ok))
+      :assign (let [tps (map k->topic-partition (:value op))]
+                (.assign consumer tps)
+                (when (:seek-to-beginning? op)
+                  (info "Seeking to beginning")
+                  (.seekToBeginning consumer tps))
+                (assoc op :type :ok))
 
       ; Crash this client, forcing us to open a new client (and consumer etc)
       :crash     (assoc op :type :info)
@@ -661,7 +665,7 @@
   2. Crashes the client, to force a fresh one to be opened, just in case
      there's broken state inside the client.
 
-  3. Assigns the new client to poll every key
+  3. Assigns the new client to poll every key, and seeks to the beginning
 
   4. Polls repeatedly
 
@@ -673,7 +677,7 @@
       (info "Polling up to offsets" offsets)
       (->> [{:f :crash}
             {:f :debug-topic-partitions, :value (keys offsets)}
-            {:f :assign, :value (keys offsets)}
+            {:f :assign, :value (keys offsets), :seek-to-beginning? true}
             (->> {:f :poll, :value [[:poll]], :poll-ms 1000}
                  repeat
                  (gen/stagger 1/5))]

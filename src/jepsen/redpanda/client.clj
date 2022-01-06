@@ -127,14 +127,16 @@
            ; chance to retry
            ProducerConfig/REQUEST_TIMEOUT_MS_CONFIG 3000
            ProducerConfig/MAX_BLOCK_MS_CONFIG 10000
-           ; Client complains `The configuration 'transaction.timeout.ms' was
-           ; supplied but isn't a known config`; not sure what's up with that
-           ; ProducerConfig/TRANSACTION_TIMEOUT_CONFIG
-           ; 10000
+           ; Client sometimes complains `The configuration
+           ; 'transaction.timeout.ms' was supplied but isn't a known config`;
+           ; not sure what's up with that
+           ProducerConfig/TRANSACTION_TIMEOUT_CONFIG
+           1000
            ; We want rapid reconnects so we can observe broken-ness
            ProducerConfig/RECONNECT_BACKOFF_MAX_MS_CONFIG 1000
            ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG 500
            ProducerConfig/SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG 1000
+
            }
     (not= nil (:acks opts))
     (assoc ProducerConfig/ACKS_CONFIG (:acks opts))
