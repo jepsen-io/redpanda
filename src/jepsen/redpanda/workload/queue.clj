@@ -1833,6 +1833,51 @@
                    (spit path (h/html html)))))
          dorun)))
 
+(defn consume-counts
+  "Kafka transactions are supposed to offer 'exactly once' processing: a
+  transaction using the subscribe workflow should be able to consume an offset
+  and send something to an output queue, and if this transaction is successful,
+  it should happen at most once.
+
+  We verify this property by looking at all committed transactions which
+  performed a poll while subscribed (not assigned!) and keeping track of the
+  number of times each key and value is polled. Yields a map of keys to values
+  to consumed counts, wherever that count is more than one."
+  [history]
+  (loopr [counts      {}  ; k->v->count
+          subscribed #{}] ; set of processes which are subscribed
+         [{:keys [type f process value] :as op} history]
+         (if (not= type :ok)
+           (recur counts subscribed)
+           (case f
+             :subscribe (recur counts (conj subscribed process))
+             (:txn, :poll)
+             (if (subscribed process)
+               ; Increment the count for each value read by this txn
+               (recur (loopr [counts counts]
+                             [[k vs] (op-reads op)
+                              v      vs]
+                             (recur (update-in counts [k v] (fnil inc 0))))
+                      subscribed)
+               ; Don't care; this might be an assign poll, and assigns are free
+               ; to double-consume
+               (recur counts subscribed))
+
+             ; Default
+             (recur counts subscribed)))
+         ; Finally, compute a distribution, and filter out anything which was
+         ; only read once.
+         (loopr [dist {}
+                 dups {}]
+                [[k k-counts] counts
+                 [v count]    k-counts]
+                (recur (update dist count (fnil inc 0))
+                       (if (< 1 count)
+                         (assoc-in dups [k v] count)
+                         dups))
+                {:distribution dist
+                 :dup-counts dups})))
+
 (defn writer-of
   "Takes a history and builds a map of keys to values to the completion
   operation which attempted to write that value."
@@ -2162,6 +2207,9 @@
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
         (plot-realtime-lags! test realtime-lag opts)
+        ; Write out a file with consume counts
+        (store/with-out-file test "consume-counts.edn"
+          (pprint (consume-counts history)))
         ; Construct results
         (->> errors
              (map (partial condense-error test))
