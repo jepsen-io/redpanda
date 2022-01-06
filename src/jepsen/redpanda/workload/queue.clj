@@ -157,8 +157,10 @@
                                     TopicPartition)
            (org.apache.kafka.common.errors AuthorizationException
                                            DisconnectException
-                                           InvalidTopicException
+                                           InvalidProducerEpochException
                                            InvalidReplicationFactorException
+                                           InvalidTopicException
+                                           InvalidTxnStateException
                                            NetworkException
                                            NotControllerException
                                            NotLeaderOrFollowerException
@@ -327,7 +329,7 @@
           (assoc ~op :type :info, :error :authorization))
         (catch RuntimeException e#
           (when (:txn ~test)
-            (info e# "Aborting transaction")
+            (info "Aborting transaction" (.getMessage e#))
             ; AbortTransaction loves to throw, which sort of masks the original
             ; cause of the abort. I don't understand why we even HAVE an abort
             ; call if it can fail so often!
@@ -465,6 +467,25 @@
           (condp re-find (.getMessage e)
             #"broker is not available"
             (assoc op :type :fail, :error :broker-not-available)
+
+            ; Well this is awkward. We actually have no way to tell Jepsen that
+            ; we'd like to close this client and set up a new one *without*
+            ; returning type :info, so even though this error isn't actually
+            ; indeterminate, we're going to have to return :info here. If we
+            ; don't, future operations will re-use this producer and they'll
+            ; all fail forever. Alternatively we could manage producer
+            ; close/open ourselves... might consider that later.
+            ;
+            ; This points to the need to add an extra feature to Jepsen--return
+            ; :fail, but also tear down this client and reopen. With or without
+            ; a new process? Unclear--we assume that a process maps to a single
+            ; producer/consumer right now, and that might break things.
+            ;
+            ; This hasn't come up before because most DB clients don't fall
+            ; over the instant they get an error code, requiring a complete
+            ; teardown and restart. Sigh.
+            #"Cannot execute transactional method because we are in an error state"
+            (assoc op :type :info, :error [:txn-in-error-state (.getMessage e)])
 
             #"Unexpected error in AddOffsetsToTxnResponse"
             (assoc op :type :fail, :error [:add-offsets (.getMessage e)])
@@ -1241,7 +1262,7 @@
                                       1)]
                           (cond (< 1 delta)
                                 {:type    :skip
-                                 :key     :x
+                                 :key     k
                                  :values  [v1 v2]
                                  :delta   delta
                                  :skipped (map by-index (range (inc i1) i2))
