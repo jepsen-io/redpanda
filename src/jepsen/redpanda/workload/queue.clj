@@ -428,8 +428,15 @@
         (catch DisconnectException e
           (assoc op :type :info, :error [:disconnect (.getMessage e)]))
 
+        (catch InvalidProducerEpochException e
+          (assoc op :type :fail, :error [:invalid-producer-epoch
+                                         (.getMessage e)]))
+
         (catch InvalidTopicException _
           (assoc op :type :fail, :error :invalid-topic))
+
+        (catch InvalidTxnStateException e
+          (assoc op :type :fail, :error [:invalid-txn-state (.getMessage e)]))
 
         (catch InvalidReplicationFactorException _
           (assoc op :type :fail :error :invalid-replication-factor))
@@ -458,6 +465,9 @@
           (condp re-find (.getMessage e)
             #"broker is not available"
             (assoc op :type :fail, :error :broker-not-available)
+
+            #"Unexpected error in AddOffsetsToTxnResponse"
+            (assoc op :type :fail, :error [:add-offsets (.getMessage e)])
 
             (throw e)))
 
