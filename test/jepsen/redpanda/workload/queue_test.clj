@@ -467,7 +467,7 @@
                       :a-mop-index 0, :b-mop-index 0}
                      {:type :ww, :key :y, :value :b, :value' :a
                       :a-mop-index 1, :b-mop-index 1}]}]
-           (-> [wa wb wa' wb'] analysis :errors :G0)))))
+           (-> [wa wb wa' wb'] (analysis {:ww-deps true}) :errors :G0)))))
 
 (deftest g1c-pure-wr-test
   ; Transaction t1 is visible to t2, and t2 is visible to t1
@@ -496,4 +496,4 @@
                       :a-mop-index 0, :b-mop-index 0}
                      {:type :ww, :key :y, :value :b, :value' :c,
                       :a-mop-index 1, :b-mop-index 1}]}]
-           (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))
+           (-> [t1 t2 t1' t2'] (analysis {:ww-deps true}) :errors :G1c)))))

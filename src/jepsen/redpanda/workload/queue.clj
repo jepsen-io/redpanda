@@ -2051,8 +2051,9 @@
   ; Bit of a hack--our tests leave off :type fairly often, so we don't bother
   ; running this analysis for those tests.
   (when (:type (first history))
-    (let [opts     {:consistency-models [:strict-serializable]
-                    :directory (str directory "/elle")}
+    (let [opts (cond-> {:consistency-models [:strict-serializable]}
+                 (contains? analysis :directory)
+                 (assoc  :directory (str directory "/elle")))
           ; For our purposes, we only want to infer cycles over txn/poll/send
           ; ops
           history  (->> history
