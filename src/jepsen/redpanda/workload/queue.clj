@@ -347,7 +347,8 @@
                    extant-topics]
   client/Client
   (open! [this test node]
-    (let [tx-id    (rc/new-transactional-id)
+    (let [;tx-id    "jepsen-txn"
+          tx-id    (rc/new-transactional-id)
           producer (rc/producer
                      (if (:txn test)
                        (assoc test :transactional-id tx-id)
@@ -1837,14 +1838,18 @@
   "Kafka transactions are supposed to offer 'exactly once' processing: a
   transaction using the subscribe workflow should be able to consume an offset
   and send something to an output queue, and if this transaction is successful,
-  it should happen at most once.
+  it should happen at most once. It's not exactly clear to me *how* these
+  semantics are supposed to work--it's clearly not once per consumer group,
+  because we routinely see dups with only one consumer group. As a fallback, we
+  look for single consumer per process, which should DEFINITELY hold, but...
+  appears not to.
 
   We verify this property by looking at all committed transactions which
   performed a poll while subscribed (not assigned!) and keeping track of the
   number of times each key and value is polled. Yields a map of keys to values
   to consumed counts, wherever that count is more than one."
   [history]
-  (loopr [counts      {}  ; k->v->count
+  (loopr [counts      {}  ; process->k->v->count
           subscribed #{}] ; set of processes which are subscribed
          [{:keys [type f process value] :as op} history]
          (if (not= type :ok)
@@ -1857,7 +1862,8 @@
                (recur (loopr [counts counts]
                              [[k vs] (op-reads op)
                               v      vs]
-                             (recur (update-in counts [k v] (fnil inc 0))))
+                             (recur (update-in
+                                      counts [process k v] (fnil inc 0))))
                       subscribed)
                ; Don't care; this might be an assign poll, and assigns are free
                ; to double-consume
@@ -1867,13 +1873,16 @@
              (recur counts subscribed)))
          ; Finally, compute a distribution, and filter out anything which was
          ; only read once.
-         (loopr [dist {}
-                 dups {}]
-                [[k k-counts] counts
-                 [v count]    k-counts]
+         (loopr [dist (sorted-map)
+                 dups (sorted-map)]
+                [[p k->v->count] counts
+                 [k v->count]    k->v->count
+                 [v count]       v->count]
                 (recur (update dist count (fnil inc 0))
                        (if (< 1 count)
-                         (assoc-in dups [k v] count)
+                         (let [k-dups' (-> (get dups k (sorted-map))
+                                           (assoc v count))]
+                           (assoc dups k k-dups'))
                          dups))
                 {:distribution dist
                  :dup-counts dups})))
