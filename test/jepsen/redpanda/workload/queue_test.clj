@@ -84,7 +84,7 @@
     (is (= [{:op    poll'
              :key   :x
              :value 2}]
-           (-> [send send' poll poll'] analysis :errors :g1a)))))
+           (-> [send send' poll poll'] analysis :errors :G1a)))))
 
 (deftest lost-update-test
   (testing "consistent"
@@ -118,6 +118,35 @@
       (is (= [{:key :x
               :lost [:a]}]
              (-> [send-a send-a' send-bc send-bc' read-bc read-bc']
+                 analysis :errors :lost-update)))))
+
+  (testing "atomic"
+    ; When we have a crashed transaction, a read of any of its values should
+    ; mean that *all* of its values are eligible for lost-update checking. Note
+    ; that this relies on still getting offsets out of :info transactions.
+    (let [; This send operation crashes, so we normally wouldn't detect it as
+          ; a lost update
+          send-ab  (o 0 0 :invoke :send [[:send :x :a] [:send :y :b]])
+          send-ab' (o 1 0 :info   :send [[:send :x :a] [:send :y [0 :b]]])
+          send-c   (o 2 1 :invoke :send [[:send :y :c]])
+          send-c'  (o 3 1 :info   :send [[:send :y :c]])
+          ; However, this poll tells us send-ab must have committed (or else
+          ; we'd have aborted read!
+          poll-a   (o 4 2 :invoke :poll [[:poll]])
+          poll-a'  (o 5 2 :ok     :poll [[:poll {:x [[0 :a]]}]])
+          ; And this tells us that we *should* have read b, since we saw c at a
+          ; higher offset
+          poll-c   (o 6 3 :invoke :poll [[:poll]])
+          poll-c'  (o 7 3 :ok     :poll [[:poll {:y [[1 :c]]}]])]
+      ; Without the poll of a, we can't prove send-ab completed, and this is
+      ; *not* a lost update.
+      (is (= nil
+             (-> [send-ab send-ab' send-c send-c' poll-c poll-c']
+                 analysis :errors :lost-update)))
+      ; But with the poll of a, it *is* a lost update
+      (is (= [{:key :y
+               :lost [:b]}]
+             (-> [send-ab send-ab' send-c send-c' poll-a poll-a' poll-c poll-c']
                  analysis :errors :lost-update))))))
 
 (deftest poll-skip-test

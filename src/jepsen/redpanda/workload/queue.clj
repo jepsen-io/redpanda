@@ -270,11 +270,11 @@
 
 (defn send-offsets!
   "Takes a client and a completed txn operation. Finds the highest polled
-  offsets from that op's :value, and calls .sendOffsetsToTransaction on the
-  producer."
+  offsets from that op's :value atom, and calls .sendOffsetsToTransaction on
+  the producer."
   [client op]
   (loopr [offsets {}] ; Map of key to offset.
-         [[_ poll]       (->> op :value (filter (comp #{:poll} first)))
+         [[_ poll]       (->> op :value deref (filter (comp #{:poll} first)))
           [k pairs]      poll
           [offset value] pairs]
          (recur (update offsets k (fnil max ##-Inf) offset))
@@ -335,6 +335,101 @@
             ; call if it can fail so often!
             (meh (.abortTransaction ^KafkaProducer (:producer ~client))))
           (throw e#))))
+
+(defmacro with-errors
+  "Takes an operation and a body. Evaluates body, catching common exceptions
+  and returning appropriate fail/info operations when they occur."
+  [op & body]
+  `(try+ ~@body
+         (catch DisconnectException e#
+           (assoc ~op :type :info, :error [:disconnect (.getMessage e#)]))
+
+         (catch InvalidProducerEpochException e#
+           (assoc ~op :type :fail, :error [:invalid-producer-epoch
+                                          (.getMessage e#)]))
+
+         (catch InvalidTopicException _#
+           (assoc ~op :type :fail, :error :invalid-topic))
+
+         (catch InvalidTxnStateException e#
+           (assoc ~op :type :fail, :error [:invalid-txn-state (.getMessage e#)]))
+
+         (catch InvalidReplicationFactorException _#
+           (assoc ~op :type :fail :error :invalid-replication-factor))
+
+         (catch NetworkException e#
+           (assoc ~op :type :info, :error [:network (.getMessage e#)]))
+
+         (catch NotControllerException e#
+           (assoc ~op :type :fail, :error :not-controller))
+
+         (catch NotLeaderOrFollowerException _#
+           ; This is, surprisingly enough, an indefinite failure.
+           (assoc ~op :type :info, :error :not-leader-or-follower))
+
+         (catch UnknownTopicOrPartitionException _#
+           (assoc ~op :type :fail, :error :unknown-topic-or-partition))
+
+         (catch UnknownServerException e#
+           (assoc ~op :type :info, :error [:unknown-server-exception
+                                          (.getMessage e#)]))
+
+         (catch TimeoutException _#
+           (assoc ~op :type :info, :error :timeout))
+
+         (catch KafkaException e#
+           (condp re-find (.getMessage e#)
+             #"broker is not available"
+             (assoc ~op :type :fail, :error :broker-not-available)
+
+             ; Well this is awkward. We actually have no way to tell Jepsen that
+             ; we'd like to close this client and set up a new one *without*
+             ; returning type :info, so even though this error isn't actually
+             ; indeterminate, we're going to have to return :info here. If we
+             ; don't, future ~operations will re-use this producer and they'll
+             ; all fail forever. Alternatively we could manage producer
+             ; close/~open ourselves... might consider that later.
+             ;
+             ; This points to the need to add an extra feature to Jepsen--return
+             ; :fail, but also tear down this client and re~open. With or without
+             ; a new process? Unclear--we assume that a process maps to a single
+             ; producer/consumer right now, and that might break things.
+             ;
+             ; This hasn't come up before because most DB clients don't fall
+             ; over the instant they get an error code, requiring a complete
+             ; teardown and restart. Sigh.
+             #"Cannot execute transactional method because we are in an error state"
+             (assoc ~op :type :info, :error [:txn-in-error-state (.getMessage e#)])
+
+             #"Unexpected error in AddOffsetsToTxnResponse"
+             (assoc ~op :type :fail, :error [:add-offsets (.getMessage e#)])
+
+             #"Unexpected error in TxnOffsetCommitResponse"
+             (assoc ~op :type :info, :error [:txn-offset-commit (.getMessage e#)])
+
+             #"Unhandled error in EndTxnResponse"
+             (assoc ~op :type :info, :error [:end-txn (.getMessage e#)])
+
+             (throw e#)))
+
+         (catch [:type :timeout] e#
+           (assoc ~op :type :info, :error :timeout))))
+
+(defmacro with-mutable-value
+  "Takes a symbol referring to an invocation operation, and evaluates body
+  where `op` has a :value which is an atom wrapping the original op's :value.
+  Expects body to return an op, and replaces that op's :value with the current
+  value of the atom.
+
+  We do this Rather Weird Thing because Redpanda might actually give us
+  informatrion like offsets for `send` during a transaction which will later
+  crash, and we want to preserve those offsets in the completed info op."
+  [op & body]
+  (assert (symbol? op))
+  `(let [value# (atom (:value ~op))
+         ~op    (assoc ~op :value value#)
+         op'#   (do ~@body)]
+     (assoc op'# :value @value#)))
 
 (defrecord Client [; What node are we bound to?
                    node
@@ -406,105 +501,39 @@
 
       ; Apply poll/send transactions
       (:poll, :send, :txn)
-      (try+
-        (with-txn test this op
-          (rc/unwrap-errors
-            (let [txn  (:value op)
-                  txn' (mapv (partial mop! this (:poll-ms op poll-ms)) txn)]
-              ; If we read, AND we're using :subscribe instead of assign,
-              ; commit offsets. My understanding is that with assign you're
-              ; not supposed to use the offset system?
-              ;
-              ; Also note that per
-              ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
-              ; commitSync is more intended for non-transactional workflows.
-              (when (and (#{:poll :txn} (:f op))
-                         (not (:txn test))
-                         (:subscribe (:sub-via test)))
-                (try (.commitSync consumer)
-                     ; If we crash during commitSync *outside* a transaction,
-                     ; it might be that we poll()ed some values in this txn
-                     ; which Kafka will think we consumed. We won't have any
-                     ; record of them if we fail the txn. Instead, we return
-                     ; an :ok txn *with* the reads, but note the lack of
-                     ; commit.
-                     (catch RuntimeException e
-                       (assoc op :type :ok, :value txn',
-                              :error [:consumer-commit (.getMessage e)]))))
-              (assoc op :type :ok, :value txn'))))
-        (catch DisconnectException e
-          (assoc op :type :info, :error [:disconnect (.getMessage e)]))
-
-        (catch InvalidProducerEpochException e
-          (assoc op :type :fail, :error [:invalid-producer-epoch
-                                         (.getMessage e)]))
-
-        (catch InvalidTopicException _
-          (assoc op :type :fail, :error :invalid-topic))
-
-        (catch InvalidTxnStateException e
-          (assoc op :type :fail, :error [:invalid-txn-state (.getMessage e)]))
-
-        (catch InvalidReplicationFactorException _
-          (assoc op :type :fail :error :invalid-replication-factor))
-
-        (catch NetworkException e
-          (assoc op :type :info, :error [:network (.getMessage e)]))
-
-        (catch NotControllerException e
-          (assoc op :type :fail, :error :not-controller))
-
-        (catch NotLeaderOrFollowerException _
-          ; This is, surprisingly enough, an indefinite failure.
-          (assoc op :type :info, :error :not-leader-or-follower))
-
-        (catch UnknownTopicOrPartitionException _
-          (assoc op :type :fail, :error :unknown-topic-or-partition))
-
-        (catch UnknownServerException e
-          (assoc op :type :info, :error [:unknown-server-exception
-                                         (.getMessage e)]))
-
-        (catch TimeoutException _
-          (assoc op :type :info, :error :timeout))
-
-        (catch KafkaException e
-          (condp re-find (.getMessage e)
-            #"broker is not available"
-            (assoc op :type :fail, :error :broker-not-available)
-
-            ; Well this is awkward. We actually have no way to tell Jepsen that
-            ; we'd like to close this client and set up a new one *without*
-            ; returning type :info, so even though this error isn't actually
-            ; indeterminate, we're going to have to return :info here. If we
-            ; don't, future operations will re-use this producer and they'll
-            ; all fail forever. Alternatively we could manage producer
-            ; close/open ourselves... might consider that later.
-            ;
-            ; This points to the need to add an extra feature to Jepsen--return
-            ; :fail, but also tear down this client and reopen. With or without
-            ; a new process? Unclear--we assume that a process maps to a single
-            ; producer/consumer right now, and that might break things.
-            ;
-            ; This hasn't come up before because most DB clients don't fall
-            ; over the instant they get an error code, requiring a complete
-            ; teardown and restart. Sigh.
-            #"Cannot execute transactional method because we are in an error state"
-            (assoc op :type :info, :error [:txn-in-error-state (.getMessage e)])
-
-            #"Unexpected error in AddOffsetsToTxnResponse"
-            (assoc op :type :fail, :error [:add-offsets (.getMessage e)])
-
-            #"Unexpected error in TxnOffsetCommitResponse"
-            (assoc op :type :info, :error [:txn-offset-commit (.getMessage e)])
-
-            #"Unhandled error in EndTxnResponse"
-            (assoc op :type :info, :error [:end-txn (.getMessage e)])
-
-            (throw e)))
-
-        (catch [:type :timeout] e
-          (assoc op :type :info, :error :timeout)))))
+      (with-mutable-value op
+        (with-errors op
+          (with-txn test this op
+            (rc/unwrap-errors
+              (do ; Evaluate micro-ops for side effects, incrementally
+                  ; transforming the transaction's micro-ops
+                  (reduce (fn [i mop]
+                            (let [mop' (mop! this (:poll-ms op poll-ms) mop)]
+                              (swap! (:value op) assoc i mop'))
+                            (inc i))
+                          0
+                          @(:value op))
+                  ; If we read, AND we're using :subscribe instead of assign,
+                  ; commit offsets. My understanding is that with assign you're
+                  ; not supposed to use the offset system?
+                  ;
+                  ; Also note that per
+                  ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
+                  ; commitSync is more intended for non-transactional workflows.
+                  (when (and (#{:poll :txn} (:f op))
+                             (not (:txn test))
+                             (:subscribe (:sub-via test)))
+                    (try (.commitSync consumer)
+                         ; If we crash during commitSync *outside* a
+                         ; transaction, it might be that we poll()ed some
+                         ; values in this txn which Kafka will think we
+                         ; consumed. We won't have any record of them if we
+                         ; fail the txn. Instead, we return an :ok txn *with*
+                         ; the reads, but note the lack of commit.
+                         (catch RuntimeException e
+                           (assoc op :type :ok
+                                  :error [:consumer-commit (.getMessage e)]))))
+                  (assoc op :type :ok))))))))
 
   (teardown! [this test])
 
@@ -1135,6 +1164,19 @@
             :value v})
          seq)))
 
+(defn must-have-committed?
+  "Takes a reads-by-type map and a (presumably :info) transaction which sent
+  something. Returns true iff the transaction was :ok, or if it was :info and
+  we can prove that some send from this transaction was successfully read."
+  [reads-by-type op]
+  (or (= :ok (:type op))
+      (and (= :info (:type op))
+           (let [ok (:ok reads-by-type)]
+             (some (fn [[k vs]]
+                     (let [ok-vs (get ok k #{})]
+                       (some ok-vs vs)))
+                   (op-writes op))))))
+
 (defn lost-update-cases
   "Takes a partial analysis and looks for cases of lost update: where a write
   that we *should* have observed is somehow not observed. Of course we cannot
@@ -1162,7 +1204,7 @@
   Once we've derived the set of values we ought to have read for some key k, we
   run through each poll of k and cross off the values read. If there are any
   values left, they must be lost updates."
-  [{:keys [history version-orders reads-by-type]}]
+  [{:keys [history version-orders reads-by-type writer-of]}]
   ; Start with all the values we know were read
   (->> (:ok reads-by-type)
        (keep (fn [[k vs]]
@@ -1175,7 +1217,6 @@
                     ; *last*?
                     last-index->values (log->last-index->values (:log vo))
 
-                    ;_ (info :k k :vs vs :vo vo)
                     ; From each value, we take the latest of the earliest
                     ; indices that value appeared at.
                     bound (->> vs
@@ -1197,7 +1238,21 @@
                     ; Now we go *back* to the read values vs, and strip them
                     ; out from the must-read set; anything left is something we
                     ; failed to read.
-                    lost (remove vs must-read)]
+                    lost (remove vs must-read)
+                    ; Because we performed this computation based on the
+                    ; version order, we may have flagged info/fail writes as
+                    ; lost. We need to go through and check that the writers
+                    ; are either a.) OK, or b.) info AND one of their writes
+                    ; was read.
+                    lost
+                    (filter
+                      (fn double-check [v]
+                        (let [w (or (get-in writer-of [k v])
+                                    (throw+ {:type  :no-writer-of
+                                             :key   k
+                                             :value v}))]
+                              (must-have-committed? reads-by-type w)))
+                      lost)]
                 (when (seq lost)
                   {:key  k
                    :lost lost}))))
