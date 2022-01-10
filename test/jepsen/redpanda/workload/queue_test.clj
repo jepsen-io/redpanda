@@ -52,14 +52,16 @@
                        :log        [#{:a} #{:b :c} nil #{:b} #{:d}]}}
           ; The write of c at 1 conflicts with the read of b at 1
           :errors [{:key :x, :index 1, :offset 1, :values #{:b :c}}]}
-
          (version-orders
            ; Read [a b] at offset 0 and 1
            [{:type :ok, :f :txn, :value [[:poll {:x [[0 :a] [1 :b]]}]]}
-            ; But write c at offset 1, b at offset 3, and d at offset 4
+            ; But write c at offset 1, b at offset 3, and d at offset 4. Even
+            ; though this crashes, we can prove it committed because we read
+            ; :b.
             {:type :info, :f :txn, :value [[:send :x [1 :c]]
                                            [:send :x [3 :b]]
-                                           [:send :x [4 :d]]]}])))
+                                           [:send :x [4 :d]]]}]
+           {:ok {:x #{:a :b}}})))
 
   (testing "a real-world example"
     (let [h [{:type :invoke, :f :send, :value [[:send 11 641]], :time 280153467070, :process 379}
@@ -71,7 +73,33 @@
                :index  0
                :offset 537
                :values #{641 645}}]
-             (:errors (version-orders h)))))))
+             (:errors (version-orders h {})))))))
+
+(deftest inconsistent-offsets-test
+  (testing "info conflicts"
+    ; In this example, we have an info send which conflicts with an ok send. We
+    ; shouldn't pick this up as a conflict, because we can assume the info
+    ; didn't commit.
+    (let [send-1  (o 0 0 :invoke :send [[:send :x 1] [:send :y 1]])
+          send-1' (o 1 0 :info   :send [[:send :x [0 1]] [:send :y 1]])
+          ; This send of 2 conflicts at offset 0
+          send-2  (o 2 1 :invoke :send [[:send :x 2]])
+          send-2' (o 3 1 :ok     :send [[:send :x [0 2]]])]
+      (is (= nil
+             (-> [send-1 send-1' send-2 send-2']
+                 analysis :errors :inconsistent-offsets)))
+      ; But if we introduce a read which observes send-1's send to y, then we
+      ; know that either that read was an aborted read, OR that send-1
+      ; committed. We assume send-1 committed, and flag this as an
+      ; inconsistency.
+      (let [poll-1  (o 4 2 :invoke :poll [[:poll]])
+            poll-1' (o 5 2 :ok     :poll [[:poll {:y [[5 1]]}]])]
+        (is (= [{:key   :x
+                 :index  0
+                 :offset 0
+                 :values #{1 2}}]
+               (-> [send-1 send-1' send-2 send-2' poll-1 poll-1']
+                   analysis :errors :inconsistent-offsets)))))))
 
 
 
@@ -214,35 +242,49 @@
   ; *prior* to t1's final value.
   ;
   ; Here process 0 polls 1 2 3, then goes back and reads 2 ... again.
-  (let [poll-123 {:process 0, :f :poll, :value [[:poll {:x [[1 :a],
-                                                            [2 :b]
-                                                            [3 :c]]}]]}
-        poll-234 {:process 0, :f :poll, :value [[:poll {:x [[2 :b]
-                                                            [3 :c]
-                                                            [4 :d]]}]]}
+  (let [send*     (o 0 0 :invoke :send [[:send :x :a]
+                                        [:send :x :b]
+                                        [:send :x :c]
+                                        [:send :x :d]])
+        send*'    (o 1 0 :ok     :send [[:send :x :a]
+                                        [:send :x :b]
+                                        [:send :x :c]
+                                        [:send :x :d]])
+        poll-123  (o 2 0 :invoke :poll [[:poll]])
+        poll-123' (o 3 0 :ok     :poll [[:poll {:x [[1 :a], [2 :b], [3 :c]]}]])
+        poll-234  (o 6 0 :invoke :poll [[:poll]])
+        poll-234' (o 7 0 :ok     :poll [[:poll {:x [[2 :b], [3 :c], [4 :d]]}]])
         nm (fn [history]
-             (when-let [es(-> history analysis :errors :nonmonotonic-poll)]
+             (when-let [es (-> history analysis :errors :nonmonotonic-poll)]
                ; Strip off indices to simplify test cases
                (map (fn [e] (update e :ops deindex)) es)))
         errs [{:key    :x
-               :ops    [poll-123 poll-234]
+               :ops    (deindex [poll-123' poll-234'])
                :values [:c :b]
                :delta  -1}]]
     (testing "together"
-      (is (= errs (nm [poll-123 poll-234]))))
+      (is (= errs (nm [send* send*' poll-123 poll-123' poll-234 poll-234']))))
 
     ; But if process 0 subscribes/assigns to a set of keys that *doesn't*
     ; include :x, we allow nonmonotonicity.
     (testing "with intermediate subscribe"
-      (let [sub-xy     {:type :ok,   :process 0, :f :subscribe, :value [:x :y]}
-            assign-xy  {:type :ok,   :process 0, :f :assign, :value [:x :y]}
-            sub-y      {:type :ok,   :process 0, :f :subscribe, :value [:y]}
-            assign-y   {:type :info, :process 0, :f :assign, :value [:y]}]
-        (is (nil? (nm [poll-123 sub-y poll-234])))
-        (is (nil? (nm [poll-123 assign-y poll-234])))
+      (let [sub-xy     (o 4 0 :invoke :subscribe [:x :y])
+            sub-xy'    (o 5 0 :ok     :subscribe [:x :y])
+            assign-xy  (o 4 0 :invoke :assign [:x :y])
+            assign-xy' (o 5 0 :ok     :assign [:x :y])
+            sub-y      (o 4 0 :invoke :subscribe [:y])
+            sub-y'     (o 5 0 :ok     :subscribe [:y])
+            assign-y   (o 4 0 :invoke :assign [:y])
+            assign-y'  (o 5 0 :ok     :assign [:y])]
+        (is (nil? (nm [send* send*' poll-123 poll-123' sub-y sub-y' poll-234
+                       poll-234'])))
+        (is (nil? (nm [send* send*' poll-123 poll-123' assign-y assign-y'
+                       poll-234 poll-234'])))
         ; But subscribes that still cover x, we preserve state
-        (is (= errs (nm [poll-123 sub-xy poll-234])))
-        (is (= errs (nm [poll-123 assign-xy poll-234])))))))
+        (is (= errs (nm [send* send*' poll-123 poll-123' sub-xy sub-xy'
+                         poll-234 poll-234'])))
+        (is (= errs (nm [send* send*' poll-123 poll-123' assign-xy assign-xy'
+                         poll-234 poll-234'])))))))
 
 (deftest nonmonotonic-send-test
   ; A nonmonotonic send occurs when a single process performs two transactions
@@ -251,7 +293,7 @@
   ;
   ; Here process 0 sends offsets 3, 4, then sends 1, 2
   (let [send-34  (o 0  0 :invoke :send [[:send :x :c] [:send :x :d]])
-        send-34' (o 1  0 :info   :send [[:send :x [3 :c]] [:send :x [4 :d]]])
+        send-34' (o 1  0 :ok     :send [[:send :x [3 :c]] [:send :x [4 :d]]])
         send-12  (o 10 0 :invoke :send [[:send :x 1] [:send :x 2]])
         send-12' (o 11 0 :ok     :send [[:send :x [1 :a]] [:send :x [2 :b]]])
         errs [{:key    :x
@@ -288,23 +330,34 @@
   ;
   ; One op observes offsets 1 and 4, but another observes offset 2, which tells
   ; us a gap exists.
-  (let [; Skip within a poll
-        poll-1-4a {:index 0, :f :poll, :value [[:poll {:x [[1 :a], [4 :d]]}]]}
+  (let [; Sends so we can poll
+        send*      (o 0 1 :invoke :send [[:send :x :a]
+                                         [:send :x :b]
+                                         [:send :x :d]])
+        send*'     (o 1 1 :info   :send [[:send :x :a]
+                                         [:send :x :b]
+                                         [:send :x :d]])
+        ; Skip within a poll
+        poll-1-4a  (o 2 0 :invoke :poll [[:poll]])
+        poll-1-4a' (o 3 0 :ok     :poll [[:poll {:x [[1 :a], [4 :d]]}]])
         ; Skip between polls
-        poll-1-4b {:index 1, :f :poll, :value [[:poll {:x [[1 :a]]}]
-                                               [:poll {:x [[4 :d]]}]]}
-        poll-2 {:index 2, :f :poll, :value [[:poll {:x [[2 :b]]}]]}]
+        poll-1-4b  (o 4 0 :invoke :poll [[:poll] [:poll]])
+        poll-1-4b' (o 5 0 :ok     :poll [[:poll {:x [[1 :a]]}]
+                                         [:poll {:x [[4 :d]]}]])
+        poll-2     (o 6 0 :invoke :poll [[:poll]])
+        poll-2'    (o 7 0 :ok     :poll [[:poll {:x [[2 :b]]}]])]
     (is (= [{:key :x
              :values  [:a :d]
              :skipped [:b]
              :delta 2
-             :op poll-1-4a}
+             :op poll-1-4a'}
             {:key :x
              :values  [:a :d]
              :skipped [:b]
              :delta 2
-             :op poll-1-4b}]
-           (-> [poll-1-4a poll-1-4b poll-2]
+             :op poll-1-4b'}]
+           (-> [send* send*' poll-1-4a poll-1-4a' poll-1-4b poll-1-4b' poll-2
+                poll-2']
                analysis
                :errors
                :int-poll-skip)))))
@@ -337,20 +390,29 @@
   ; An *internal nonmonotonic poll* occurs within the scope of a single
   ; transaction, where one or more poll() calls yield a pair of values such
   ; that the former has an equal or higher offset than the latter.
-  (let [poll-31a {:index 0, :f :poll, :value [[:poll {:x [[3 :c] [1 :a]]}]]}
+  (let [send*     (o 0 0 :invoke :send [[:send :x :a]
+                                        [:send :x :b]
+                                        [:send :x :c]])
+        send*'    (o 1 0 :info   :send [[:send :x :a]
+                                        [:send :x :b]
+                                        [:send :x :c]])
+        poll-31a  (o 2 0 :invoke :poll [[:poll]])
+        poll-31a' (o 3 0 :ok     :poll [[:poll {:x [[3 :c] [1 :a]]}]])
         ; This read of :b tells us there was an index between :a and :c; the
         ; delta is therefore -2.
-        poll-33b {:index 1, :f :poll, :value [[:poll {:x [[2 :b] [3 :c]]}]
-                                              [:poll {:x [[3 :c]]}]]}]
+        poll-33b  (o 4 0 :invoke :poll [[:poll]])
+        poll-33b' (o 5 0 :ok     :poll [[:poll {:x [[2 :b] [3 :c]]}]
+                                        [:poll {:x [[3 :c]]}]])]
     (is (= [{:key    :x
              :values [:c :a]
              :delta  -2
-             :op poll-31a}
+             :op poll-31a'}
             {:key    :x
              :values [:c :c]
              :delta  0
-             :op     poll-33b}]
-           (-> [poll-31a poll-33b] analysis :errors :int-nonmonotonic-poll)))))
+             :op     poll-33b'}]
+           (-> [send* send*' poll-31a poll-31a' poll-33b poll-33b']
+               analysis :errors :int-nonmonotonic-poll)))))
 
 (deftest int-nonmonotonic-send-test
   ; An *internal nonmonotonic send* occurs within the scope of a single
@@ -363,11 +425,11 @@
         send-42b  (o 2 0 :invoke :send [[:send :y :d] [:send :y :b]])
         send-42b' (o 3 0 :info   :send [[:send :y :d] [:send :y :b]])
         ; c has to come from somewhere, too
-        send-3b   (o 4 1 :invoke :send [[:send :y :c]])
-        send-3b'  (o 5 1 :info   :send [[:send :y :c]])
-        ; This poll tells us b < d
+        send-3c   (o 4 1 :invoke :send [[:send :y :c]])
+        send-3c'  (o 5 1 :info   :send [[:send :y :c]])
+        ; This poll tells us b < d on y
         poll-42b  (o 6 0 :invoke :poll [[:poll]])
-        poll-42b' (o 7 0 :info   :poll [[:poll {:y [[2 :b] [3 :c] [4 :d]]}]])]
+        poll-42b' (o 7 0 :ok     :poll [[:poll {:y [[2 :b] [3 :c] [4 :d]]}]])]
     (is (= [{:key    :x
              :values [:c :a]
              :delta  -1
@@ -376,7 +438,8 @@
              :values [:d :b]
              :delta  -2
              :op     send-42b'}]
-           (-> [send-31a send-31a' send-42b send-42b' send-3b send-3b' poll-42b poll-42b']
+           (-> [send-31a send-31a' send-42b send-42b' send-3c send-3c'
+                poll-42b poll-42b']
                analysis :errors :int-nonmonotonic-send)))))
 
 (deftest duplicate-test

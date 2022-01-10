@@ -745,147 +745,6 @@
   (when (< i (count v))
     (nth v i)))
 
-(defn version-orders-update-log
-  "Updates a version orders log with the given offset and value."
-  [log offset value]
-  (if-let [values (nth+ log offset)]
-    (assoc  log offset (conj values value)) ; Already have values
-    (assocv log offset #{value}))) ; First time we've seen this offset
-
-(defn version-orders-reduce-mop
-  "Takes a logs object from version-orders and a micro-op, and integrates that
-  micro-op's information about offsets into the logs."
-  [logs mop]
-  (case (first mop)
-    :send (let [[_ k v] mop]
-            (if (vector? v)
-              (let [[offset value] v]
-                (if offset
-                  ; We completed the send and know an offset
-                  (update logs k version-orders-update-log offset value)
-                  ; Not sure what the offset was
-                  logs))
-              ; Not even offset structure: maybe an :info txn
-              logs))
-
-    :poll (reduce (fn poll-key [logs [k pairs]]
-                    (reduce (fn pair [logs [offset value]]
-                              (if offset
-                                (update logs k version-orders-update-log
-                                        offset value)
-                                logs))
-                            logs
-                            pairs))
-                  logs
-                  (second mop))))
-
-(defn index-seq
-  "Takes a seq of distinct values, and returns a map of:
-
-    {:by-index    A vector of the sequence
-     :by-value    A map of values to their indices in the vector.}"
-  [xs]
-  {:by-index (vec xs)
-   :by-value (into {} (map-indexed (fn [i x] [x i]) xs))})
-
-(defn log->value->first-index
-  "Takes a log: a vector of sets of read values for each offset in a partition,
-  possibly including `nil`s. Returns a map which takes a value to the index
-  where it first appeared."
-  [log]
-  (->> (remove nil? log)
-       (reduce (fn [[earliest i] values]
-                 [(reduce (fn [earliest value]
-                            (if (contains? earliest value)
-                              earliest
-                              (assoc earliest value i)))
-                          earliest
-                          values)
-                  (inc i)])
-               [{} 0])
-       first))
-
-(defn log->last-index->values
-  "Takes a log: a vector of sets of read values for each offset in a partition,
-  possibly including `nil`s. Returns a vector which takes indices (dense
-  offsets) to sets of values whose *last* appearance was at that position."
-  [log]
-  (->> (remove nil? log)
-       ; Build up a map of values to their latest indexes
-       (reduce (fn latest [[latest i] values]
-                 [(reduce (fn [latest value]
-                            (assoc latest value i))
-                          latest
-                          values)
-                  (inc i)])
-               [{} 0])
-       first
-       ; Then invert that map into a vector of indexes to sets
-       (reduce (fn [log [value index]]
-                 (let [values (get log index #{})]
-                   (assocv log index (conj values value))))
-               [])))
-
-(defn version-orders
-  "Takes a history and constructs a map of:
-
-  {:orders   A map of keys to orders for that key. Each order is a map of:
-               {:by-index        A vector which maps indices to single values,
-                                 in log order.
-                :by-value        A map of values to indices in the log.
-                :log             A vector which maps offsets to sets of values
-                                 in log order.}
-
-   :errors   A series of error maps describing any incompatible orders, where
-             a single offset for a key maps to multiple values.}
-
-  Offsets are directly from Kafka. Indices are *dense* offsets, removing gaps
-  in the log."
-  ([history]
-   (version-orders history {}))
-  ([history logs]
-   ; Logs is a map of keys to vectors, where index i in one of those vectors is
-   ; the vector of all observed values for that index.
-   (if (seq history)
-     (let [op       (first history)
-           history' (next history)]
-       (case (:type op)
-         ; There's nothing we can tell from invokes or fails
-         (:invoke, :fail) (recur history' logs)
-
-         ; Infos... right now nothing but we MIGHT be able to get partial info
-         ; later, so we'll process them anyway.
-         (case (:f op)
-           (:poll, :send, :txn)
-           (recur history' (reduce version-orders-reduce-mop logs (:value op)))
-           ; Some non-transactional op, like an assign/subscribe
-           (recur history' logs))))
-     ; All done; transform our logs to orders.
-     {:errors (->> logs
-                   (mapcat (fn errors [[k log]]
-                             (->> log
-                                  (reduce (fn [[offset index errs] values]
-                                            (condp <= (count values)
-                                              ; Divergence
-                                              2 [(inc offset) (inc index)
-                                                 (conj errs {:key    k
-                                                             :offset offset
-                                                             :index  index
-                                                             :values values})]
-                                              ; No divergence
-                                              1 [(inc offset) (inc index) errs]
-                                              ; Hole in log
-                                              0 [(inc offset) index errs]))
-                                          [0 0 []])
-                                  last)))
-                   seq)
-      :orders
-      (map-vals
-        (fn key-order [log]
-          (assoc (->> log (remove nil?) (map first) index-seq)
-                 :log log))
-        logs)})))
-
 (defn op-writes-helper
   "Takes an operation and a function which takes an offset-value pair. Returns
   a map of keys written by this operation to the sequence of (f [offset value])
@@ -1030,7 +889,7 @@
   ([k offset op]
    (op-around-key-offset k offset 3 op))
   ([k offset n op]
-   (when (and (= :ok (:type op))
+   (when (and (not= :invoke (:type op))
               (#{:send :poll :txn} (:f op)))
      (let [value'
            (keep (fn [[f v :as mop]]
@@ -1043,10 +902,12 @@
                                            pairs)]
                                (when (seq trimmed)
                                  [:poll {k trimmed}])))
-                     :send (let [[_ k2 [o v]] mop]
-                             (when (and (= k k2)
-                                        (<= (- offset n) o (+ offset n)))
-                               mop))))
+                     :send (let [[_ k2 v-or-pair] mop]
+                             (when (vector? v-or-pair)
+                               (let [[o v] v-or-pair]
+                                 (when (and (= k k2)
+                                            (<= (- offset n) o (+ offset n)))
+                                   mop))))))
                  (:value op))]
        (when-not (empty? value')
          (assoc op :value value'))))))
@@ -1146,6 +1007,159 @@
                         (map (partial map-vals set))
                         (reduce (partial merge-with set/union) {}))))))
 
+
+(defn must-have-committed?
+  "Takes a reads-by-type map and a (presumably :info) transaction which sent
+  something. Returns true iff the transaction was :ok, or if it was :info and
+  we can prove that some send from this transaction was successfully read."
+  [reads-by-type op]
+  (or (= :ok (:type op))
+      (and (= :info (:type op))
+           (let [ok (:ok reads-by-type)]
+             (some (fn [[k vs]]
+                     (let [ok-vs (get ok k #{})]
+                       (some ok-vs vs)))
+                   (op-writes op))))))
+
+(defn version-orders-update-log
+  "Updates a version orders log with the given offset and value."
+  [log offset value]
+  (if-let [values (nth+ log offset)]
+    (assoc  log offset (conj values value)) ; Already have values
+    (assocv log offset #{value}))) ; First time we've seen this offset
+
+(defn version-orders-reduce-mop
+  "Takes a logs object from version-orders and a micro-op, and integrates that
+  micro-op's information about offsets into the logs."
+  [logs mop]
+  (case (first mop)
+    :send (let [[_ k v] mop]
+            (if (vector? v)
+              (let [[offset value] v]
+                (if offset
+                  ; We completed the send and know an offset
+                  (update logs k version-orders-update-log offset value)
+                  ; Not sure what the offset was
+                  logs))
+              ; Not even offset structure: maybe an :info txn
+              logs))
+
+    :poll (reduce (fn poll-key [logs [k pairs]]
+                    (reduce (fn pair [logs [offset value]]
+                              (if offset
+                                (update logs k version-orders-update-log
+                                        offset value)
+                                logs))
+                            logs
+                            pairs))
+                  logs
+                  (second mop))))
+
+(defn index-seq
+  "Takes a seq of distinct values, and returns a map of:
+
+    {:by-index    A vector of the sequence
+     :by-value    A map of values to their indices in the vector.}"
+  [xs]
+  {:by-index (vec xs)
+   :by-value (into {} (map-indexed (fn [i x] [x i]) xs))})
+
+(defn log->value->first-index
+  "Takes a log: a vector of sets of read values for each offset in a partition,
+  possibly including `nil`s. Returns a map which takes a value to the index
+  where it first appeared."
+  [log]
+  (->> (remove nil? log)
+       (reduce (fn [[earliest i] values]
+                 [(reduce (fn [earliest value]
+                            (if (contains? earliest value)
+                              earliest
+                              (assoc earliest value i)))
+                          earliest
+                          values)
+                  (inc i)])
+               [{} 0])
+       first))
+
+(defn log->last-index->values
+  "Takes a log: a vector of sets of read values for each offset in a partition,
+  possibly including `nil`s. Returns a vector which takes indices (dense
+  offsets) to sets of values whose *last* appearance was at that position."
+  [log]
+  (->> (remove nil? log)
+       ; Build up a map of values to their latest indexes
+       (reduce (fn latest [[latest i] values]
+                 [(reduce (fn [latest value]
+                            (assoc latest value i))
+                          latest
+                          values)
+                  (inc i)])
+               [{} 0])
+       first
+       ; Then invert that map into a vector of indexes to sets
+       (reduce (fn [log [value index]]
+                 (let [values (get log index #{})]
+                   (assocv log index (conj values value))))
+               [])))
+
+(defn version-orders
+  "Takes a history and a reads-by-type structure. Constructs a map of:
+
+  {:orders   A map of keys to orders for that key. Each order is a map of:
+               {:by-index        A vector which maps indices to single values,
+                                 in log order.
+                :by-value        A map of values to indices in the log.
+                :log             A vector which maps offsets to sets of values
+                                 in log order.}
+
+   :errors   A series of error maps describing any incompatible orders, where
+             a single offset for a key maps to multiple values.}
+
+  Offsets are directly from Kafka. Indices are *dense* offsets, removing gaps
+  in the log."
+  ([history reads-by-type]
+   (version-orders history reads-by-type {}))
+  ([history reads-by-type logs]
+   ; Logs is a map of keys to vectors, where index i in one of those vectors is
+   ; the vector of all observed values for that index.
+   (if (seq history)
+     (let [op       (first history)
+           history' (next history)]
+       (if (must-have-committed? reads-by-type op)
+         (case (:f op)
+           (:poll, :send, :txn)
+           (recur history' reads-by-type
+                  (reduce version-orders-reduce-mop logs (:value op)))
+           ; Some non-transactional op, like an assign/subscribe
+           (recur history' reads-by-type logs))
+         ; We can't assume this committed; don't consider it.
+         (recur history' reads-by-type logs)))
+     ; All done; transform our logs to orders.
+     {:errors (->> logs
+                   (mapcat (fn errors [[k log]]
+                             (->> log
+                                  (reduce (fn [[offset index errs] values]
+                                            (condp <= (count values)
+                                              ; Divergence
+                                              2 [(inc offset) (inc index)
+                                                 (conj errs {:key    k
+                                                             :offset offset
+                                                             :index  index
+                                                             :values values})]
+                                              ; No divergence
+                                              1 [(inc offset) (inc index) errs]
+                                              ; Hole in log
+                                              0 [(inc offset) index errs]))
+                                          [0 0 []])
+                                  last)))
+                   seq)
+      :orders
+      (map-vals
+        (fn key-order [log]
+          (assoc (->> log (remove nil?) (map first) index-seq)
+                 :log log))
+        logs)})))
+
 (defn g1a-cases
   "Takes a partial analysis and looks for aborted reads, where a known-failed
   write is nonetheless visible to a committed read. Returns a seq of error
@@ -1163,19 +1177,6 @@
             :key   k
             :value v})
          seq)))
-
-(defn must-have-committed?
-  "Takes a reads-by-type map and a (presumably :info) transaction which sent
-  something. Returns true iff the transaction was :ok, or if it was :info and
-  we can prove that some send from this transaction was successfully read."
-  [reads-by-type op]
-  (or (= :ok (:type op))
-      (and (= :info (:type op))
-           (let [ok (:ok reads-by-type)]
-             (some (fn [[k vs]]
-                     (let [ok-vs (get ok k #{})]
-                       (some ok-vs vs)))
-                   (op-writes op))))))
 
 (defn lost-update-cases
   "Takes a partial analysis and looks for cases of lost update: where a write
@@ -2132,9 +2133,9 @@
   ([history opts]
   (let [history               (history/index history)
         history               (remove (comp #{:nemesis} :process) history)
-        version-orders        (future (version-orders history))
         writes-by-type        (future (writes-by-type history))
         reads-by-type         (future (reads-by-type history))
+        version-orders        (future (version-orders history @reads-by-type))
         writer-of             (future (writer-of history))
         readers-of            (future (readers-of history))
         ; Sort of a hack; we only bother computing this for "real" histories
@@ -2200,7 +2201,7 @@
                (assoc :inconsistent-offsets version-order-errors)
 
                @g1a-cases
-               (assoc :g1a @g1a-cases)
+               (assoc :G1a @g1a-cases)
 
                @lost-update-cases
                (assoc :lost-update @lost-update-cases)
