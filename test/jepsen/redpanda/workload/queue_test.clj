@@ -109,7 +109,8 @@
         send' (o 1 0 :fail   :send [[:send :x 2] [:send :y 3]])
         poll  (o 2 1 :invoke :poll [[:poll]])
         poll' (o 3 1 :ok     :poll [[:poll {:x [[0 2]]}]])]
-    (is (= [{:op    poll'
+    (is (= [{:reader poll'
+             :writer send'
              :key   :x
              :value 2}]
            (-> [send send' poll poll'] analysis :errors :G1a)))))

@@ -1164,7 +1164,7 @@
   "Takes a partial analysis and looks for aborted reads, where a known-failed
   write is nonetheless visible to a committed read. Returns a seq of error
   maps, or nil if none are found."
-  [{:keys [history writes-by-type]}]
+  [{:keys [history writes-by-type writer-of]}]
   (let [failed (:fail writes-by-type)
         ops (->> history
                  (filter (comp #{:ok} :type))
@@ -1173,9 +1173,10 @@
                [k vs] (op-reads op)
                v      vs
                :when (contains? (get failed k) v)]
-           {:op    op
-            :key   k
-            :value v})
+           {:key    k
+            :value  v
+            :writer (get-in writer-of [k v])
+            :reader op})
          seq)))
 
 (defn lost-update-cases
