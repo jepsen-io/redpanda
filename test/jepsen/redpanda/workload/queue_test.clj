@@ -127,8 +127,18 @@
           send-c'  (o 5 1 :info   :send [[:send :x :c]])
           poll     (o 6 0 :invoke :poll [[:poll]])
           poll'    (o 7 0 :ok     :poll [[:poll {:x [[2 :c]]}]])]
-      (is (= [{:key :x
-               :lost [:a :b]}]
+      (is (= [{:key             :x
+               :value           :a
+               :index           0
+               :max-read-index  2
+               :writer          send-a'
+               :max-read        poll'}
+              {:key             :x
+               :value           :b
+               :index           1
+               :max-read-index  2
+               :writer          send-bd'
+               :max-read        poll'}]
              (-> [send-a send-a' send-bd send-bd' send-c send-c' poll poll']
                  analysis :errors :lost-update)))))
 
@@ -144,8 +154,12 @@
           send-bc' (o 3 0 :ok     :send [[:send :x [0 :b]] [:send :x [2 :c]]])
           read-bc  (o 4 0 :invoke :poll [[:poll]])
           read-bc' (o 5 0 :ok     :poll [[:poll {:x [[0 :b] [2 :c]]}]])]
-      (is (= [{:key :x
-              :lost [:a]}]
+      (is (= [{:key             :x
+               :value           :a
+               :index           0
+               :max-read-index  1 ; There is no offset 1
+               :writer          send-a'
+               :max-read        read-bc'}]
              (-> [send-a send-a' send-bc send-bc' read-bc read-bc']
                  analysis :errors :lost-update)))))
 
@@ -173,8 +187,12 @@
              (-> [send-ab send-ab' send-c send-c' poll-c poll-c']
                  analysis :errors :lost-update)))
       ; But with the poll of a, it *is* a lost update
-      (is (= [{:key :y
-               :lost [:b]}]
+      (is (= [{:key              :y
+               :value            :b
+               :index            0
+               :max-read-index   1
+               :writer           send-ab'
+               :max-read         poll-c'}]
              (-> [send-ab send-ab' send-c send-c' poll-a poll-a' poll-c poll-c']
                  analysis :errors :lost-update))))))
 

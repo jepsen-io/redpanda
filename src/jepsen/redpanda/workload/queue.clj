@@ -1206,58 +1206,73 @@
   Once we've derived the set of values we ought to have read for some key k, we
   run through each poll of k and cross off the values read. If there are any
   values left, they must be lost updates."
-  [{:keys [history version-orders reads-by-type writer-of]}]
+  [{:keys [history version-orders reads-by-type writer-of readers-of]}]
   ; Start with all the values we know were read
   (->> (:ok reads-by-type)
-       (keep (fn [[k vs]]
-              ; Great, now for this key, find the highest index observed
-              (let [vo         (get version-orders k)
-                    ; For each value, what's the earliest index we observed
-                    ; that value at?
-                    value->first-index (log->value->first-index (:log vo))
-                    ; And for each index, which values appeared at that index
-                    ; *last*?
-                    last-index->values (log->last-index->values (:log vo))
+       (mapcat
+         (fn [[k vs]]
+           ; Great, now for this key, find the highest index observed
+           (let [vo         (get version-orders k)
+                 ; For each value, what's the earliest index we observed
+                 ; that value at?
+                 value->first-index (log->value->first-index (:log vo))
+                 ; And for each index, which values appeared at that index
+                 ; *last*?
+                 last-index->values (log->last-index->values (:log vo))
 
-                    ; From each value, we take the latest of the earliest
-                    ; indices that value appeared at.
-                    bound (->> vs
-                               ; We might observe a value but *not* know
-                               ; its offset from either write or read.
-                               ; When this happens, we can't say anything
-                               ; about how much of the partition should
-                               ; have been observed, so we skip it.
-                               (keep value->first-index)
-                               (reduce max -1))
-                    ; Now take a prefix of last-index->values up to that
-                    ; index; these are the values we should have observed.
-                    must-read (->> (inc bound)
-                                   (subvec last-index->values 0)
-                                   ; This is a vector of sets. We glue them
-                                   ; together this way to preserve index order.
-                                   (mapcat identity)
-                                   distinct)
-                    ; Now we go *back* to the read values vs, and strip them
-                    ; out from the must-read set; anything left is something we
-                    ; failed to read.
-                    lost (remove vs must-read)
-                    ; Because we performed this computation based on the
-                    ; version order, we may have flagged info/fail writes as
-                    ; lost. We need to go through and check that the writers
-                    ; are either a.) OK, or b.) info AND one of their writes
-                    ; was read.
-                    lost
-                    (filter
-                      (fn double-check [v]
-                        (let [w (or (get-in writer-of [k v])
-                                    (throw+ {:type  :no-writer-of
-                                             :key   k
-                                             :value v}))]
-                              (must-have-committed? reads-by-type w)))
-                      lost)]
-                (when (seq lost)
-                  {:key  k
-                   :lost lost}))))
+                 ; From each value, we take the latest of the earliest
+                 ; indices that value appeared at.
+                 bound (->> vs
+                            ; We might observe a value but *not* know
+                            ; its offset from either write or read.
+                            ; When this happens, we can't say anything
+                            ; about how much of the partition should
+                            ; have been observed, so we skip it.
+                            (keep value->first-index)
+                            (reduce max -1))
+                 ; Now take a prefix of last-index->values up to that
+                 ; index; these are the values we should have observed.
+                 must-read (->> (inc bound)
+                                (subvec last-index->values 0)
+                                ; This is a vector of sets. We glue them
+                                ; together this way to preserve index order.
+                                (mapcat identity)
+                                distinct)
+                 ; To demonstrate these errors to users, we want to prove that
+                 ; some reader observed the maximum offset (and therefore
+                 ; someone else should have observed lower offsets).
+                 max-read (->> (nth last-index->values bound)
+                               first ; If there were conflicts, any value
+                               ; will do
+                               (vector k)
+                               (get-in readers-of)
+                               first)
+                 ; Now we go *back* to the read values vs, and strip them
+                 ; out from the must-read set; anything left is something we
+                 ; failed to read.
+                 lost (remove vs must-read)
+                 ; Because we performed this computation based on the
+                 ; version order, we may have flagged info/fail writes as
+                 ; lost. We need to go through and check that the writers
+                 ; are either a.) OK, or b.) info AND one of their writes
+                 ; was read.
+                 lost
+                 (filter
+                   (fn double-check [v]
+                     (let [w (or (get-in writer-of [k v])
+                                 (throw+ {:type  :no-writer-of
+                                          :key   k
+                                          :value v}))]
+                       (must-have-committed? reads-by-type w)))
+                   lost)]
+             (->> lost
+                  (map (fn [v]
+                         {:key            k
+                          :value          v
+                          :index          (get value->first-index v)
+                          :max-read-index bound
+                          :writer         (get-in writer-of [k v])
+                          :max-read       max-read}))))))
        seq))
 
 (defn strip-types
