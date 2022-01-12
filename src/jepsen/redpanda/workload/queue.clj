@@ -157,6 +157,7 @@
                                     TopicPartition)
            (org.apache.kafka.common.errors AuthorizationException
                                            DisconnectException
+                                           InterruptException
                                            InvalidProducerEpochException
                                            InvalidReplicationFactorException
                                            InvalidTopicException
@@ -291,6 +292,49 @@
              (.sendOffsetsToTransaction ^KafkaProducer (:producer client)
                                         kafka-offsets
                                         consumer-group-id)))))
+(defn safe-abort!
+  "Transactional aborts in the Kafka client can themselves fail, which requires
+  that we do a complex error-handling dance to retain the original exception as
+  well as the one thrown during the abort process. This function takes a
+  producer, whether we're aborting before or after calling commit, and an
+  exception thrown by the transaction body (the reason why we're aborting in
+  the first place). Tries to abort the transaction on the current producer,
+  then throws a map of:
+
+    {:type          :abort
+     :abort-ok?     True if we successfully aborted, false if the abort threw.
+     :tried-commit? Whether we attempted to commit the transaction.
+     :body-error    The exception which caused us to try the abort
+     :abort-error   If the abort call itself crashed, the exception thrown.
+     :definite?     If true, the transaction *should* not have taken place. If
+                    false, the transaction may have taken place.}"
+  [^KafkaProducer producer, tried-commit?, body-error]
+  (try (.abortTransaction producer)
+       (catch RuntimeException abort-error
+         ; But of course the abort can crash! We throw a wrapper exception
+         ; which captures both the abort error and the error thrown from the
+         ; body that made us *try* the abort.
+         ;
+         ; When this happens, we need to close the producer.
+         (throw+ {:type           :abort
+                  :abort-ok?      false
+                  :tried-commit?  tried-commit?
+                  :definite?
+                  (or ; If we didn't try to commit, we know
+                      ; this definitely didn't happen.
+                      (not tried-commit?)
+                      ; Likewise, if we see an invalid txn state during commit,
+                      ; that should signal the txn didn't happen.
+                      (instance? InvalidTxnStateException body-error))
+                  :body-error     body-error
+                  :abort-error    abort-error})))
+  ; Here we know that the abort completed; it's
+  ; safe to re-use this producer.
+  (throw+ {:type           :abort
+           :abort-ok?      true
+           :tried-commit?  tried-commit?
+           :definite?      true
+           :body-error     body-error}))
 
 (defmacro with-txn
   "Takes a test, a client, an operation, and a body. If (:txn test) is false,
@@ -314,45 +358,69 @@
 
   For all other errors, aborts the transaction and throws."
   [test client op & body]
-  `(try (when (:txn ~test)
-          (.beginTransaction ^KafkaProducer (:producer ~client)))
-        (let [op'# (do ~@body)]
-          (when (:txn ~test)
-            (send-offsets! ~client op'#)
-            (.commitTransaction ^KafkaProducer (:producer ~client)))
-          op'#)
-        (catch ProducerFencedException e#
-          (assoc ~op :type :info, :error :producer-fenced))
-        (catch OutOfOrderSequenceException e#
-          (assoc ~op :type :info, :error :out-of-order-sequence))
-        (catch AuthorizationException e#
-          (assoc ~op :type :info, :error :authorization))
-        (catch RuntimeException e#
-          (when (:txn ~test)
-            (info "Aborting transaction" (.getMessage e#))
-            ; AbortTransaction loves to throw, which sort of masks the original
-            ; cause of the abort. I don't understand why we even HAVE an abort
-            ; call if it can fail so often!
-            (meh (.abortTransaction ^KafkaProducer (:producer ~client))))
-          (throw e#))))
+  ; These three specific errors are definite but *cannot* be aborted, so we
+  ; have to throw them separately; they'll be handled by with-errors. We also
+  ; have to repeat them in two separate try/catch clauses, so we write them
+  ; down here.
+  (let [definite-non-abortable-catches
+        `[(catch ProducerFencedException     e# (throw e#))
+          (catch OutOfOrderSequenceException e# (throw e#))
+          (catch AuthorizationException      e# (throw e#))]]
+    `(if-not (:txn ~test)
+       ; Not a transaction; evaluate normally.
+       (do ~@body)
+       ; Great, we're a transaction. Let the producer know.
+       (let [producer# ^KafkaProducer (:producer ~client)]
+         (.beginTransaction producer#)
+         ; Actually evaluate body, and possibly send offsets to the txn
+         (let [op'# (try (let [op'# (do ~@body)]
+                           (send-offsets! ~client op'#)
+                           op'#)
+                         ; Some errors aren't allowed to abort
+                         ~@definite-non-abortable-catches
+                         ; For all other errors...
+                         (catch RuntimeException body-err#
+                           ; If we crash *prior* to commit, we're allowed to
+                           ; abort
+                           (safe-abort! producer# false body-err#)))]
+           ; Now we can commit the txn
+           (try (.commitTransaction producer#)
+                ; Again, some errors aren't allowed to abort
+                ~@definite-non-abortable-catches
+                ; Timeouts and interrupts are indefinite and also
+                ; non-abortable; we throw these and let the enclosing error
+                ; handler grab them.
+                (catch TimeoutException e#
+                  (throw e#))
+                (catch InterruptException e#
+                  (throw e#))
+                ; But for *other* exceptions, we need to abort, and of
+                ; course that can fail again as well, so we call safe-abort!
+                (catch RuntimeException e#
+                  (safe-abort! producer# true e#)))
+           op'#)))))
 
 (defmacro with-errors
   "Takes an operation and a body. Evaluates body, catching common exceptions
   and returning appropriate fail/info operations when they occur."
   [op & body]
   `(try+ ~@body
-         (catch DisconnectException e#
+          (catch AuthorizationException _#
+            (assoc ~op
+                   :type         :fail
+                   :error        :authorization
+                   :end-process? true))
+
+          (catch DisconnectException e#
            (assoc ~op :type :info, :error [:disconnect (.getMessage e#)]))
 
          (catch InvalidProducerEpochException e#
-           (assoc ~op :type :fail, :error [:invalid-producer-epoch
-                                          (.getMessage e#)]))
+           (assoc ~op
+                  :type  :fail
+                  :error [:invalid-producer-epoch (.getMessage e#)]))
 
          (catch InvalidTopicException _#
            (assoc ~op :type :fail, :error :invalid-topic))
-
-         (catch InvalidTxnStateException e#
-           (assoc ~op :type :fail, :error [:invalid-txn-state (.getMessage e#)]))
 
          (catch InvalidReplicationFactorException _#
            (assoc ~op :type :fail :error :invalid-replication-factor))
@@ -364,8 +432,21 @@
            (assoc ~op :type :fail, :error :not-controller))
 
          (catch NotLeaderOrFollowerException _#
-           ; This is, surprisingly enough, an indefinite failure.
+           ; This is, surprisingly enough, not a definite failure! See
+           ; https://issues.apache.org/jira/browse/KAFKA-13574
            (assoc ~op :type :info, :error :not-leader-or-follower))
+
+         (catch OutOfOrderSequenceException _#
+            (assoc ~op
+                   :type         :fail
+                   :error        :out-of-order-sequence
+                   :end-process? true))
+
+         (catch ProducerFencedException _#
+            (assoc ~op
+                   :type         :fail,
+                   :error        :producer-fenced
+                   :end-process? true))
 
          (catch UnknownTopicOrPartitionException _#
            (assoc ~op :type :fail, :error :unknown-topic-or-partition))
@@ -375,42 +456,46 @@
                                           (.getMessage e#)]))
 
          (catch TimeoutException _#
-           (assoc ~op :type :info, :error :timeout))
+           (assoc ~op :type :info, :error :kafka-timeout))
 
          (catch KafkaException e#
            (condp re-find (.getMessage e#)
              #"broker is not available"
              (assoc ~op :type :fail, :error :broker-not-available)
 
-             ; Well this is awkward. We actually have no way to tell Jepsen that
-             ; we'd like to close this client and set up a new one *without*
-             ; returning type :info, so even though this error isn't actually
-             ; indeterminate, we're going to have to return :info here. If we
-             ; don't, future ~operations will re-use this producer and they'll
-             ; all fail forever. Alternatively we could manage producer
-             ; close/~open ourselves... might consider that later.
-             ;
-             ; This points to the need to add an extra feature to Jepsen--return
-             ; :fail, but also tear down this client and re~open. With or without
-             ; a new process? Unclear--we assume that a process maps to a single
-             ; producer/consumer right now, and that might break things.
-             ;
-             ; This hasn't come up before because most DB clients don't fall
-             ; over the instant they get an error code, requiring a complete
-             ; teardown and restart. Sigh.
+             ; This signifies that the producer is borked somehow and we need
+             ; to tear it down and start a new one.
              #"Cannot execute transactional method because we are in an error state"
-             (assoc ~op :type :info, :error [:txn-in-error-state (.getMessage e#)])
+             (assoc ~op
+                    :type         :fail
+                    :error        [:txn-in-error-state (.getMessage e#)]
+                    :end-process? true)
 
              #"Unexpected error in AddOffsetsToTxnResponse"
              (assoc ~op :type :fail, :error [:add-offsets (.getMessage e#)])
 
              #"Unexpected error in TxnOffsetCommitResponse"
-             (assoc ~op :type :info, :error [:txn-offset-commit (.getMessage e#)])
+             (assoc ~op
+                    :type  :fail
+                    :error [:txn-offset-commit (.getMessage e#)])
 
              #"Unhandled error in EndTxnResponse"
              (assoc ~op :type :info, :error [:end-txn (.getMessage e#)])
 
              (throw e#)))
+
+         (catch [:type :abort] e#
+           (assoc ~op
+                  :type         (if (:definite? e#) :fail :info)
+                  ; If we were able to abort successfully, it's OK to re-use
+                  ; this process; otherwise we need to tear it down.
+                  :end-process? (not (:abort-ok? e#))
+                  :error        (cond-> e#
+                                  ; We'd like string representations rather
+                                  ; than full objects here, so we can serialize
+                                  ; the history.
+                                  true              (update :body-error str)
+                                  (:abort-error e#) (update :abort-error str))))
 
          (catch [:type :timeout] e#
            (assoc ~op :type :info, :error :timeout))))
@@ -1242,8 +1327,7 @@
                  ; some reader observed the maximum offset (and therefore
                  ; someone else should have observed lower offsets).
                  max-read (->> (nth last-index->values bound)
-                               first ; If there were conflicts, any value
-                               ; will do
+                               first ; If there were conflicts, any value ok
                                (vector k)
                                (get-in readers-of)
                                first)
@@ -2284,7 +2368,12 @@
                     worst-realtime-lag
                     unseen] :as analysis}
             (analysis history {:directory dir
-                               :ww-deps   (:ww-depts test)})]
+                               :ww-deps   (:ww-depts test)})
+            ; What caused our transactions to return indefinite results?
+            info-txn-causes (->> history
+                                 (filter (comp #{:info} :type))
+                                 (filter (comp #{:txn :send :poll} :f))
+                                 distinct)]
         ; Render plots
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
@@ -2300,7 +2389,8 @@
                      :worst-realtime-lag (-> worst-realtime-lag
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))
-                     :error-types        (keys errors)}))))))
+                     :error-types        (keys errors)
+                     :info-txn-causes    info-txn-causes}))))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given
