@@ -2146,6 +2146,7 @@
   "Analyzes a history to extract write-write dependencies. T1 < T2 iff T1 sends
   some v1 to k and T2 sends some v2 to k and v1 < v2 in the version order."
   [{:keys [writer-of version-orders ww-deps]} history]
+  (info :ww-deps ww-deps)
   {:graph (if-not ww-deps
             ; We might ask not to infer ww dependencies, in which case this
             ; graph is empty.
@@ -2379,7 +2380,7 @@
                     worst-realtime-lag
                     unseen] :as analysis}
             (analysis history {:directory dir
-                               :ww-deps   (:ww-depts test)})
+                               :ww-deps   (:ww-deps test)})
             ; What caused our transactions to return indefinite results?
             info-txn-causes (->> history
                                  (filter (comp #{:info} :type))
