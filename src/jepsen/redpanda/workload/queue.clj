@@ -2146,7 +2146,6 @@
   "Analyzes a history to extract write-write dependencies. T1 < T2 iff T1 sends
   some v1 to k and T2 sends some v2 to k and v1 < v2 in the version order."
   [{:keys [writer-of version-orders ww-deps]} history]
-  (info :ww-deps ww-deps)
   {:graph (if-not ww-deps
             ; We might ask not to infer ww dependencies, in which case this
             ; graph is empty.
@@ -2158,7 +2157,7 @@
                      (if-let [v1 (previous-value version-order v2)]
                        (if-let [op1 (v->writer v1)]
                          (if (= op1 op2)
-                           g
+                           (recur g) ; No self-edges
                            (recur (g/link g op1 op2 :ww)))
                          (throw+ {:type   :no-writer-of-value
                                   :key    k
