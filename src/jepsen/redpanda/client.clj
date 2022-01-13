@@ -52,6 +52,10 @@
   "Used to ensure that we only log producer configs once."
   (atom false))
 
+(def consumer-group
+  "Right now all consumers are a single consumer group."
+  "jepsen-group")
+
 (defn consumer-config
   "Constructs a properties map for talking to a given Kafka node."
   [node opts]
@@ -95,7 +99,7 @@
      ; ???
      }
     (:subscribe (:sub-via opts))
-    (assoc ConsumerConfig/GROUP_ID_CONFIG "jepsen_group")
+    (assoc ConsumerConfig/GROUP_ID_CONFIG consumer-group)
 
     (not= nil (:isolation-level opts))
     (assoc ConsumerConfig/ISOLATION_LEVEL_CONFIG (:isolation-level opts))

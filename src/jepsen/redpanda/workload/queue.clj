@@ -286,12 +286,23 @@
                                      ; offset, not the one we observed.
                                      (rc/offset+metadata (inc offset))])
                                   (into {}))
-               consumer-group-id "jepsen_group"] ; TODO: change this?
+               producer ^KafkaProducer (:producer client)
+               consumer ^KafkaConsumer (:consumer client)]
            (when-not (empty? offsets)
-             (info :send-offsets consumer-group-id offsets)
-             (.sendOffsetsToTransaction ^KafkaProducer (:producer client)
-                                        kafka-offsets
-                                        consumer-group-id)))))
+             (info :send-offsets offsets)
+             (.sendOffsetsToTransaction
+               producer
+               kafka-offsets
+               ; Redpanda doesn't support this version yet; it'll throw:
+               ;
+               ; org.apache.kafka.common.errors.UnsupportedVersionException:
+               ; Broker doesn't support group metadata commit API on version 2,
+               ; minimum supported request version is 3 which requires brokers
+               ; to be on version 2.5 or above.
+               ;(.groupMetadata consumer)
+               ; Instead we send the consumer group--this is the old API
+               rc/consumer-group)))))
+
 (defn safe-abort!
   "Transactional aborts in the Kafka client can themselves fail, which requires
   that we do a complex error-handling dance to retain the original exception as
@@ -2373,6 +2384,7 @@
             info-txn-causes (->> history
                                  (filter (comp #{:info} :type))
                                  (filter (comp #{:txn :send :poll} :f))
+                                 (map :error)
                                  distinct)]
         ; Render plots
         (render-order-viz!   test analysis)
