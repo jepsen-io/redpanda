@@ -236,9 +236,14 @@
 
   db/LogFiles
   (log-files [this test node]
-    (concat (when (:tcpdump test)
-              (db/log-files tcpdump test node))
-            [log-file]))
+    ; Tar up the data dir
+    (let [tarball "/tmp/jepsen/data.tar.bz2"]
+      (c/exec :mkdir :-p "/tmp/jepsen")
+      (c/exec :tar :cjf tarball data-dir)
+      (merge (when (:tcpdump test)
+               (db/log-files tcpdump test node))
+             {log-file "redpanda.log"
+              tarball  "data.tar.bz2"})))
 
   db/Process
   (start! [this test node]
