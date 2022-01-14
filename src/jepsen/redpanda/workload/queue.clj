@@ -1275,8 +1275,8 @@
             :reader op})
          seq)))
 
-(defn lost-update-cases
-  "Takes a partial analysis and looks for cases of lost update: where a write
+(defn lost-write-cases
+  "Takes a partial analysis and looks for cases of lost write: where a write
   that we *should* have observed is somehow not observed. Of course we cannot
   expect to observe everything: for example, if we send a message to Redpanda
   at the end of a test, and don't poll for it, there's no chance of us seeing
@@ -1989,7 +1989,7 @@
   renders an HTML timeline of how each operation perceived that key's log."
   [test {:keys [version-orders errors history] :as analysis}]
   (let [history (filter (comp #{:ok} :type) history)]
-    (->> (select-keys errors [:inconsistent-offsets :duplicate :lost-update])
+    (->> (select-keys errors [:inconsistent-offsets :duplicate :lost-write])
          (mapcat val)
          (map :key)
          distinct
@@ -2267,7 +2267,7 @@
                                      :reads-by-type  @reads-by-type
                                      :version-orders version-orders)
         g1a-cases               (future (g1a-cases analysis))
-        lost-update-cases       (future (lost-update-cases analysis))
+        lost-write-cases        (future (lost-write-cases analysis))
         poll-skip+nm-cases      (future (poll-skip+nonmonotonic-cases analysis))
         nonmonotonic-send-cases (future (nonmonotonic-send-cases analysis))
         int-poll-skip+nm-cases  (future (int-poll-skip+nonmonotonic-cases analysis))
@@ -2314,8 +2314,8 @@
                @g1a-cases
                (assoc :G1a @g1a-cases)
 
-               @lost-update-cases
-               (assoc :lost-update @lost-update-cases)
+               @lost-write-cases
+               (assoc :lost-write @lost-write-cases)
 
                nonmonotonic-poll-cases
                (assoc :nonmonotonic-poll nonmonotonic-poll-cases)
@@ -2338,7 +2338,7 @@
      :version-orders     version-orders})))
 
 (defn condense-error
-  "Takes a test and a  pair of an error type (e.g. :lost-update) and a seq of
+  "Takes a test and a  pair of an error type (e.g. :lost-write) and a seq of
   errors. Returns a pair of [type, {:count n, :errors [...]}], which tries to
   show the most interesting or severe errors without making the pretty-printer
   dump out two gigabytes of EDN."

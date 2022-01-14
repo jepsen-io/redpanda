@@ -115,7 +115,7 @@
              :value 2}]
            (-> [send send' poll poll'] analysis :errors :G1a)))))
 
-(deftest lost-update-test
+(deftest lost-write-test
   (testing "consistent"
     ; We submit a at offset 0, b at offset 1, and d at offset 3. A read observes
     ; c at offset 2, which implies we should also have read a and b.
@@ -140,7 +140,7 @@
                :writer          send-bd'
                :max-read        poll'}]
              (-> [send-a send-a' send-bd send-bd' send-c send-c' poll poll']
-                 analysis :errors :lost-update)))))
+                 analysis :errors :lost-write)))))
 
   (testing "inconsistent"
     ; Here, we have inconsistent offsets. a is submitted at offset 0, but gets
@@ -161,7 +161,7 @@
                :writer          send-a'
                :max-read        read-bc'}]
              (-> [send-a send-a' send-bc send-bc' read-bc read-bc']
-                 analysis :errors :lost-update)))))
+                 analysis :errors :lost-write)))))
 
   (testing "atomic"
     ; When we have a crashed transaction, a read of any of its values should
@@ -185,7 +185,7 @@
       ; *not* a lost update.
       (is (= nil
              (-> [send-ab send-ab' send-c send-c' poll-c poll-c']
-                 analysis :errors :lost-update)))
+                 analysis :errors :lost-write)))
       ; But with the poll of a, it *is* a lost update
       (is (= [{:key              :y
                :value            :b
@@ -194,7 +194,7 @@
                :writer           send-ab'
                :max-read         poll-c'}]
              (-> [send-ab send-ab' send-c send-c' poll-a poll-a' poll-c poll-c']
-                 analysis :errors :lost-update))))))
+                 analysis :errors :lost-write))))))
 
 (deftest poll-skip-test
   ; Process 0 observes offsets 1, 2, then 4, then 7, but we know 3 and 6
