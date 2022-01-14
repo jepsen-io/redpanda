@@ -2401,7 +2401,7 @@
                      :worst-realtime-lag (-> worst-realtime-lag
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))
-                     :error-types        (keys errors)
+                     :error-types        (sort (keys errors))
                      :info-txn-causes    info-txn-causes}))))))
 
 (defn workload
