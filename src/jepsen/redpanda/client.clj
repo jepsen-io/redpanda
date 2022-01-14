@@ -13,6 +13,7 @@
                                            AdminClientConfig
                                            NewTopic)
            (org.apache.kafka.clients.consumer ConsumerConfig
+                                              ConsumerRebalanceListener
                                               ConsumerRecord
                                               ConsumerRecords
                                               KafkaConsumer
@@ -255,8 +256,10 @@
 
 (defn subscribe!
   "Subscribes to the given set of topics."
-  [^KafkaConsumer consumer, topics]
-  (.subscribe consumer topics))
+  ([^KafkaConsumer consumer, topics]
+   (.subscribe consumer topics))
+  ([^KafkaConsumer consumer, topics, rebalance-listener]
+   (.subscribe consumer topics rebalance-listener)))
 
 (defn poll-up-to
   "Takes a consumer, and polls it (with duration 0) for records up to and
@@ -313,3 +316,38 @@
             (if (instance? KafkaException cause#)
               (throw cause#)
               (throw e#))))))
+
+(defn panicky-rebalance-listener
+  "A ConsumerRebalanceListener which throws at the drop of a hat. We use this
+  to make sure transactions aren't quietly having their topics/indices
+  reassigned during execution."
+  []
+  (reify ConsumerRebalanceListener
+    (onPartitionsRevoked [_ topic-partitions]
+      (throw+ {:type       :partitions-revoked
+               :partitions topic-partitions}))
+
+    (onPartitionsAssigned [_ topic-partitions]
+      (throw+ {:type       :partitions-assigned
+               :partitions topic-partitions}))
+
+    (onPartitionsLost [_ topic-partitions]
+      (throw+ {:type       :partitions-lost
+               :partitions topic-partitions}))))
+
+(defn logging-rebalance-listener
+  "A rebalance listener which journals each event to an atom containing a
+  vector."
+  [log-atom]
+  (reify ConsumerRebalanceListener
+    (onPartitionsRevoked [_ topic-partitions]
+      (swap! log-atom conj {:type :revoked
+                            :partitions topic-partitions}))
+
+    (onPartitionsAssigned [_ topic-partitions]
+      (swap! log-atom conj {:type       :assigned
+                            :partitions topic-partitions}))
+
+    (onPartitionsLost [_ topic-partitions]
+      (swap! log-atom conj (throw+ {:type       :lost
+                                    :partitions topic-partitions})))))

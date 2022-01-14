@@ -510,8 +510,41 @@
                                   true              (update :body-error str)
                                   (:abort-error e#) (update :abort-error str))))
 
+         (catch [:type :partitions-assigned] e#
+           (assoc ~op :type :fail, :error e#))
+
+         (catch [:type :partitions-lost] e#
+           (assoc ~op :type :fail, :error e#))
+
+         (catch [:type :partitions-revoked] e#
+           (assoc ~op :type :fail, :error e#))
+
          (catch [:type :timeout] e#
            (assoc ~op :type :info, :error :timeout))))
+
+(defmacro with-rebalance-log
+  "Ugh, everything needs state tracking. I'm so sorry, this is an enormous
+  spaghetti pile.
+
+  Basically, we want to know whether rebalances happened during a given
+  transaction, because we suspect that they might be implicated in certain
+  Weird Polling Events. We take a client and a body. Before the body, we clear
+  the client's rebalance log atom, and when the body is complete (returning
+  op') we snarf the client's rebalance log and store it in the completion op,
+  so that it's available for inspection later."
+  [client & body]
+  `(let [log# (:rebalance-log ~client)]
+     (reset! log# [])
+     (let [op'# ~@body
+           log# (map (fn [entry#]
+                       (-> entry#
+                           (dissoc :partitions)
+                           (assoc :keys (map topic-partition->k
+                                             (:partitions entry#)))))
+                     @log#)]
+       (if (seq log#)
+         (assoc op'# :rebalance-log log#)
+         op'#))))
 
 (defmacro with-mutable-value
   "Takes a symbol referring to an invocation operation, and evaluates body
@@ -537,7 +570,10 @@
                    ^KafkaConsumer consumer
                    ; An atom with a set of topics we've created. We have to
                    ; create topics before they can be used.
-                   extant-topics]
+                   extant-topics
+                   ; An atom of a vector of consumer rebalance events
+                   ; love too track state everywhere
+                   rebalance-log]
   client/Client
   (open! [this test node]
     (let [;tx-id    "jepsen-txn"
@@ -591,47 +627,54 @@
           (assoc op :type :fail, :error :connection-refused)))
 
       ; Subscribe to the topics containing these keys
-      :subscribe (do (->> (:value op)
-                          (map k->topic)
-                          distinct
-                          (rc/subscribe! consumer))
-                     (assoc op :type :ok))
+      :subscribe
+      (let [topics (->> (:value op)
+                        (map k->topic)
+                        distinct)]
+        (if (:txn test)
+          (rc/subscribe! consumer
+                         topics
+                         (rc/logging-rebalance-listener rebalance-log))
+          (rc/subscribe! consumer topics))
+        (assoc op :type :ok))
 
       ; Apply poll/send transactions
       (:poll, :send, :txn)
       (with-mutable-value op
-        (with-errors op
-          (with-txn test this op
-            (rc/unwrap-errors
-              (do ; Evaluate micro-ops for side effects, incrementally
-                  ; transforming the transaction's micro-ops
-                  (reduce (fn [i mop]
-                            (let [mop' (mop! this (:poll-ms op poll-ms) mop)]
-                              (swap! (:value op) assoc i mop'))
-                            (inc i))
-                          0
-                          @(:value op))
-                  ; If we read, AND we're using :subscribe instead of assign,
-                  ; commit offsets. My understanding is that with assign you're
-                  ; not supposed to use the offset system?
-                  ;
-                  ; Also note that per
-                  ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
-                  ; commitSync is more intended for non-transactional workflows.
-                  (when (and (#{:poll :txn} (:f op))
-                             (not (:txn test))
-                             (:subscribe (:sub-via test)))
-                    (try (.commitSync consumer)
-                         ; If we crash during commitSync *outside* a
-                         ; transaction, it might be that we poll()ed some
-                         ; values in this txn which Kafka will think we
-                         ; consumed. We won't have any record of them if we
-                         ; fail the txn. Instead, we return an :ok txn *with*
-                         ; the reads, but note the lack of commit.
-                         (catch RuntimeException e
-                           (assoc op :type :ok
-                                  :error [:consumer-commit (.getMessage e)]))))
-                  (assoc op :type :ok))))))))
+        (with-rebalance-log this
+          (with-errors op
+            (with-txn test this op
+              (rc/unwrap-errors
+                (do ; Evaluate micro-ops for side effects, incrementally
+                    ; transforming the transaction's micro-ops
+                    (reduce (fn [i mop]
+                              (let [mop' (mop! this (:poll-ms op poll-ms) mop)]
+                                (swap! (:value op) assoc i mop'))
+                              (inc i))
+                            0
+                            @(:value op))
+                    ; If we read, AND we're using :subscribe instead of assign,
+                    ; commit offsets. My understanding is that with assign
+                    ; you're not supposed to use the offset system?
+                    ;
+                    ; Also note that per
+                    ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
+                    ; commitSync is more intended for non-transactional
+                    ; workflows.
+                    (when (and (#{:poll :txn} (:f op))
+                               (not (:txn test))
+                               (:subscribe (:sub-via test)))
+                      (try (.commitSync consumer)
+                           ; If we crash during commitSync *outside* a
+                           ; transaction, it might be that we poll()ed some
+                           ; values in this txn which Kafka will think we
+                           ; consumed. We won't have any record of them if we
+                           ; fail the txn. Instead, we return an :ok txn *with*
+                           ; the reads, but note the lack of commit.
+                           (catch RuntimeException e
+                             (assoc op :type :ok
+                                    :error [:consumer-commit (.getMessage e)]))))
+                    (assoc op :type :ok)))))))))
 
   (teardown! [this test])
 
@@ -648,7 +691,8 @@
 (defn client
   "Constructs a fresh client for this workload."
   []
-  (map->Client {:extant-topics (atom #{})}))
+  (map->Client {:extant-topics (atom #{})
+                :rebalance-log (atom [])}))
 
 ;; Generator
 
