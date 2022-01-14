@@ -1943,9 +1943,9 @@
   offsets."
   [k log history]
   (let [; Turn an index into a y-coordinate
-        i->y      (fn [i] (* i 20))
+        i->y      (fn [i] (* i 14))
         ; Turn an offset into an x-coordinate
-        offset->x (fn [offset] (* offset 20))
+        offset->x (fn [offset] (* offset 24))
         ; Turn a log, index, and op, and pairs in that op into an SVG element
         row (fn [i {:keys [type time f process value] :as op} pairs]
               (let [y (i->y i)]
@@ -1969,22 +1969,17 @@
                 rows  []]
                [op history]
                (if-let [pairs (-> op op-pairs (get k))]
-                 (let [_ (prn :pairs pairs)
-                       row (row i op pairs)
-                       _ (prn :row row)
+                 (let [row (row i op pairs)
                        max-y (->> row next next first second :y (max max-y))
-                       _ (prn :max-y max-y)
                        max-x (->> row next next
                                   (map (comp :x second))
                                   (reduce max max-x))]
-                   (prn :max-x max-x)
                    (recur (inc i)
                           max-x
                           max-y
                           (conj rows row)))
                  ; Nothing relevant here, skip it
                  (recur i max-x max-y rows)))
-        _ (prn :rows (take 4 rows))
         svg (svg/svg {"version" "2.0"
                       "width"   (+ max-x 20)
                       "height"  (+ max-y 20)}
