@@ -119,7 +119,9 @@
   polls k and observes any of v1, v2, or v3, but not *all* of them. This
   miiight be captured as a wr-rw cycle in some cases, but perhaps not all,
   since we're only generating rw edges for final reads."
-  (:require [clojure [pprint :refer [pprint]]
+  (:require [analemma [xml :as xml]
+                      [svg :as svg]]
+            [clojure [pprint :refer [pprint]]
                      [set :as set]]
             [clojure.java.io :as io]
             [clojure.tools.logging :refer [info warn]]
@@ -1936,53 +1938,62 @@
 
 (defn key-order-viz
   "Takes a key, a log for that key (a vector of offsets to sets of elements
-  which were observed at that offset), and a history of ops relevant to that
-  key. Constructs a Hiccup structure visualizing all views of the log's
+  which were observed at that offset) and a history of ops relevant to that
+  key. Constructs an XML structure visualizing all sends/polls of that log's
   offsets."
   [k log history]
-  [:html
-   [:head
-    [:style "th { text-align: left; }"]]
-   [:body
-    [:h1 (str "Key " k)]
-    [:table
-     [:thead
-      [:tr
-       [:th "Index"]
-       [:th "Time (s)"]
-       [:th "Process"]
-       [:th "Fun"]
-       [:th {:colspan 32} "View of log"]]]
-     [:tbody
-      (->> (for [{:keys [index time process f] :as op} history]
-             (when-let [pairs (-> op op-pairs (get k))]
-               [:tr
-                (concat
-                  [[:td index]
-                   [:td (when time (format "%.2f" (nanos->secs time)))]
-                   [:td process]
-                   [:td (when f (name f))]]
-                  ; TODO: not handling duplicate offsets here; will
-                  ; need to fix when we go to txns
-                  (->> pairs
-                       (reduce
-                         (fn per-cell [cells [offset value]]
-                           (if (nil? offset)
-                             cells
-                             ; Is this an unambiguous offset?
-                             (let [compat? (-> log (nth offset) count (< 2))
-                                   attrs (if compat?
-                                           {}
-                                           {:style (str "background: "
-                                                        (rand-bg-color
-                                                          value))})]
-                               (assocv cells offset [:td attrs value]))))
-                         [])
-                       (map (fn [cell]
-                              (if (nil? cell)
-                                [:td]
-                                cell)))))]))
-           (remove nil?))]]]])
+  (let [; Turn an index into a y-coordinate
+        i->y      (fn [i] (* i 20))
+        ; Turn an offset into an x-coordinate
+        offset->x (fn [offset] (* offset 20))
+        ; Turn a log, index, and op, and pairs in that op into an SVG element
+        row (fn [i {:keys [type time f process value] :as op} pairs]
+              (let [y (i->y i)]
+                (into [:g [:title (str (name type) " " (name f)
+                                       " by process " process "\n"
+                                       (pr-str value))]]
+                      (for [[offset value] pairs :when offset]
+                        (let [compat? (-> log (nth offset) count (< 2))
+                              style   (str (when-not compat?
+                                             (str "background: "
+                                                  (rand-bg-color value) ";")))]
+                          [:text (cond-> {:x (offset->x offset)
+                                          :y y
+                                          :style style})
+                           (str value)])))))
+        ; Compute rows and bounds
+        [_ max-x max-y rows]
+        (loopr [i     0
+                max-x 0
+                max-y 0
+                rows  []]
+               [op history]
+               (if-let [pairs (-> op op-pairs (get k))]
+                 (let [_ (prn :pairs pairs)
+                       row (row i op pairs)
+                       _ (prn :row row)
+                       max-y (->> row next next first second :y (max max-y))
+                       _ (prn :max-y max-y)
+                       max-x (->> row next next
+                                  (map (comp :x second))
+                                  (reduce max max-x))]
+                   (prn :max-x max-x)
+                   (recur (inc i)
+                          max-x
+                          max-y
+                          (conj rows row)))
+                 ; Nothing relevant here, skip it
+                 (recur i max-x max-y rows)))
+        _ (prn :rows (take 4 rows))
+        svg (svg/svg {"version" "2.0"
+                      "width"   (+ max-x 20)
+                      "height"  (+ max-y 20)}
+                     [:style "svg {
+                              font-family: Helvetica, Arial, sans-serif;
+                              font-size: 10px;
+                             }"]
+                     (cons :g rows))]
+    svg))
 
 (defn render-order-viz!
   "Takes a test, an analysis, and for each key with certain errors
@@ -1994,11 +2005,11 @@
          (map :key)
          distinct
          (pmap (fn [k]
-                 (let [html (key-order-viz k
-                                           (get-in version-orders [k :log])
-                                           history)
-                       path (store/path! test "orders" (format "%03d.html" k))]
-                   (spit path (h/html html)))))
+                 (let [svg (key-order-viz k
+                                          (get-in version-orders [k :log])
+                                          history)
+                       path (store/path! test "orders" (format "%03d.svg" k))]
+                   (spit path (xml/emit svg)))))
          dorun)))
 
 (defn consume-counts

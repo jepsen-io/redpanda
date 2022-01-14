@@ -12,6 +12,7 @@
   :test-selectors {:focus :focus}
   :repl-options {:init-ns jepsen.redpanda.core}
   :jvm-opts ["-server"
+             ;"-XX:-OmitStackTraceInFastThrow"
              "-Djava.awt.headless=true"
              ; GC tuning--see
              ; https://wiki.openjdk.java.net/display/shenandoah/Main
