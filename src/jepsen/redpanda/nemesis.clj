@@ -293,6 +293,10 @@
             ; When our request is rejected, we know the node isn't being
             ; removed and leave it in the original state.
             [(assoc op :error (:body e)) this])
+          (catch [:status 503] e
+            ; This could go either way, so we flag the node as :removing just
+            ; in case.
+            [(assoc op :error (:body e)) this'])
           (catch [:status 500] e
             ; This could go either way, so we flag the node as :removing just
             ; in case.

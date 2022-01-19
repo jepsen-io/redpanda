@@ -1,6 +1,7 @@
 (ns jepsen.redpanda.core
   "Entry point for command line runner. Constructs tests and runs them."
-  (:require [clojure [string :as str]]
+  (:require [clojure [string :as str]
+                     [walk :as walk]]
             [clojure.tools.logging :refer [info warn]]
             [jepsen [checker :as checker]
                     [cli :as cli]
@@ -11,7 +12,9 @@
             [jepsen.redpanda [db :as db]
                              [nemesis :as nemesis]]
             [jepsen.redpanda.workload [list-append :as list-append]
-                                      [queue :as queue]]))
+                                      [queue :as queue]]
+            [slingshot.slingshot :refer [try+ throw+]])
+  (:import (org.apache.http.impl.client InternalHttpClient)))
 
 (def workloads
   "A map of workload names to workload constructor functions."
@@ -93,6 +96,37 @@
    "org.apache.kafka.common.utils.AppInfoParser"                     :warn
    })
 
+(defn contains-http-client?
+  "Seriously, where the hell is this HTTP client coming from?"
+  [x]
+  (let [found? (atom false)]
+    (walk/postwalk (fn [x]
+                     ; Can't refer to a private class directly...
+                     (when (and x (re-find #"HttpClient" (.getName (class x))))
+                       (reset! found? true))
+                     x)
+                   x)
+    @found?))
+
+(defn http-client-warner
+  "Takes a generator and listens for updates, warning about any HTTP clients
+  that leak out. You can wrap a generator in this if you wind up hitting
+  serialization errors due to an HTTP client leaking into the history, and
+  can't figure out just from the logs where it came from--this will cause the
+  whole test to explode when it happens."
+  [gen]
+  (reify gen/Generator
+    (op [this test context]
+      (when-let [[op gen'] (gen/op gen test context)]
+        [op (http-client-warner gen')]))
+
+    (update [this test context event]
+      (let [gen' (gen/update gen test context event)]
+        (when (contains-http-client? event)
+          (throw+ {:type  :http-client-in-history
+                   :event event}))
+        (http-client-warner gen')))))
+
 (defn short-version
   "Takes CLI options and returns a short version string like \"21.11.2\" or
   \"foo.deb\"."
@@ -168,7 +202,28 @@
                          :clock     {:targets (:db-targets opts)}
                          :pause     {:targets (:db-targets opts)}
                          :kill      {:targets (:db-targets opts)}
-                         :interval  (:nemesis-interval opts)})]
+                         :interval  (:nemesis-interval opts)})
+        generator (let [fg (:final-generator workload)]
+                    (-> (gen/phases
+                          (->> (:generator workload)
+                               (gen/stagger    (/ (:rate opts)))
+                               (gen/nemesis    (:generator nemesis))
+                               (gen/time-limit (:time-limit opts)))
+                          (gen/nemesis (:final-generator nemesis))
+                          (when fg
+                            (gen/phases
+                              (gen/log "Waiting for recovery")
+                              (gen/sleep 10)
+                              ; Redpanda might not give consumers elements
+                              ; they want to see, so we eventually give up
+                              ; here
+                              (gen/time-limit (:final-time-limit opts)
+                                              (gen/clients
+                                                (:final-generator workload))))))
+                        ; Uncomment this if you're having trouble debugging
+                        ; serialization errors with HTTPClients
+                        ;http-client-warner
+                        ))]
     (merge tests/noop-test
            opts
            {:name      (test-name opts)
@@ -176,23 +231,7 @@
             :os        debian/os
             :client    (:client workload)
             :nemesis   (:nemesis nemesis)
-            :generator (let [fg (:final-generator workload)]
-                         (gen/phases
-                           (->> (:generator workload)
-                                (gen/stagger    (/ (:rate opts)))
-                                (gen/nemesis    (:generator nemesis))
-                                (gen/time-limit (:time-limit opts)))
-                           (gen/nemesis (:final-generator nemesis))
-                           (when fg
-                             (gen/phases
-                               (gen/log "Waiting for recovery")
-                               (gen/sleep 10)
-                               ; Redpanda might not give consumers elements
-                               ; they want to see, so we eventually give up
-                               ; here
-                               (gen/time-limit (:final-time-limit opts)
-                                 (gen/clients
-                                   (:final-generator workload)))))))
+            :generator generator
             :checker   (checker/compose
                          {:stats      (stats-checker)
                           :clock      (checker/clock-plot)
