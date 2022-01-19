@@ -238,8 +238,8 @@
   (log-files [this test node]
     ; Tar up the data dir
     (let [tarball "/tmp/jepsen/data.tar.bz2"]
-      (c/exec :mkdir :-p "/tmp/jepsen")
-      (c/exec :tar :cjf tarball data-dir)
+      (c/su (c/exec :mkdir :-p "/tmp/jepsen")
+            (c/exec :tar :cjf tarball data-dir))
       (merge (when (:tcpdump test)
                (db/log-files tcpdump test node))
              {log-file "redpanda.log"
