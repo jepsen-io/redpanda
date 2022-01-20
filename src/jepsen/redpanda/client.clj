@@ -302,6 +302,25 @@
              (concat records
                      (lazy-seq (poll-up-to consumer offset duration))))))))
 
+(defn ^KafkaConsumer reset-to-last-committed-positions!
+  "Takes a Consumer, and seeks back to the last offsets that were committed.
+  Returns consumer. Adapted from
+  https://github.com/apache/kafka/blob/7d9b9847f184ec72c4c80c046edc408789dcc066/examples/src/main/java/kafka/examples/ExactlyOnceMessageProcessor.java#L177-L184."
+  [^KafkaConsumer consumer]
+  (let [assignment (.assignment consumer)
+        committed  (.committed consumer assignment)]
+    (doseq [^TopicPartition topic-partition assignment]
+      (if-let [^OffsetAndMetadata offset+metadata
+               (.get committed topic-partition)]
+        (.seek consumer topic-partition (.offset offset+metadata))
+        (.seekToBeginning [topic-partition]))))
+   consumer)
+
+(defn abort-txn!
+  "Aborts a transaction."
+  [^KafkaProducer producer]
+  (.abortTransaction producer))
+
 (defmacro unwrap-errors
   "Depending on whether you're doing a future get or a sync call, Kafka might
   throw its exceptions wrapped in a j.u.c.ExecutionException. This macro
@@ -349,5 +368,5 @@
                             :partitions topic-partitions}))
 
     (onPartitionsLost [_ topic-partitions]
-      (swap! log-atom conj (throw+ {:type       :lost
-                                    :partitions topic-partitions})))))
+      (swap! log-atom conj {:type       :lost
+                            :partitions topic-partitions}))))
