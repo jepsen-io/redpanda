@@ -309,10 +309,11 @@
   "Transactional aborts in the Kafka client can themselves fail, which requires
   that we do a complex error-handling dance to retain the original exception as
   well as the one thrown during the abort process. This function takes a
-  producer, whether we're aborting before or after calling commit, and an
+  client, whether we're aborting before or after calling commit, and an
   exception thrown by the transaction body (the reason why we're aborting in
-  the first place). Tries to abort the transaction on the current producer,
-  then throws a map of:
+  the first place). Tries to abort the transaction on the current producer. If
+  the abort succeeds, resets the consumer to the last committed offsets as
+  known to the server. Then throws a map of:
 
     {:type          :abort
      :abort-ok?     True if we successfully aborted, false if the abort threw.
@@ -321,8 +322,9 @@
      :abort-error   If the abort call itself crashed, the exception thrown.
      :definite?     If true, the transaction *should* not have taken place. If
                     false, the transaction may have taken place.}"
-  [^KafkaProducer producer, tried-commit?, body-error]
-  (try (.abortTransaction producer)
+  [client tried-commit?, body-error]
+  (try (rc/abort-txn! (:producer client))
+       (rc/reset-to-last-committed-positions! (:consumer client))
        (catch RuntimeException abort-error
          ; But of course the abort can crash! We throw a wrapper exception
          ; which captures both the abort error and the error thrown from the
@@ -395,7 +397,7 @@
                          (catch RuntimeException body-err#
                            ; If we crash *prior* to commit, we're allowed to
                            ; abort
-                           (safe-abort! producer# false body-err#)))]
+                           (safe-abort! ~client false body-err#)))]
            ; Now we can commit the txn
            (try (.commitTransaction producer#)
                 ; Again, some errors aren't allowed to abort
@@ -410,7 +412,7 @@
                 ; But for *other* exceptions, we need to abort, and of
                 ; course that can fail again as well, so we call safe-abort!
                 (catch RuntimeException e#
-                  (safe-abort! producer# true e#)))
+                  (safe-abort! ~client true e#)))
            op'#)))))
 
 (defmacro with-errors
