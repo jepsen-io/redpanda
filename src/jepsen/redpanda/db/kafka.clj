@@ -35,7 +35,6 @@
 (def kafka
   "Program that launches kafka."
   (str dir "/bin/kafka-server-start.sh"))
-                                6 (109
 
 (def kafka-log-file
   (str dir "/kafka.log"))
