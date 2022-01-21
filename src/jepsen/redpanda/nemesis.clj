@@ -10,7 +10,7 @@
             [jepsen.control.net :as cn]
             [jepsen.nemesis [combined :as nc]
                             [membership :as membership]]
-            [jepsen.redpanda [db :as rdb]]
+            [jepsen.redpanda.db.redpanda :as rdb]
             [slingshot.slingshot :refer [try+ throw+]]))
 
 (def min-cluster-size

@@ -613,11 +613,12 @@
         (try
           (let [tps (->> (:value op)
                          (real-pmap (fn [k]
-                                 [k (db/topic-partition-state
+                                 [k (db/topic-partition-state (:db test)
                                       node (k->topic-partition k))]))
                          (into (sorted-map)))]
             (assoc op :type :ok, :value {:node    node
-                                         :node-id (db/node-id test node)
+                                         :node-id (db/node-id (:db test)
+                                                              test node)
                                          :partitions tps}))
           (catch java.util.concurrent.ExecutionException e
             (throw (util/ex-root-cause e))))

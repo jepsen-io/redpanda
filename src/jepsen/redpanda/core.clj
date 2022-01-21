@@ -9,8 +9,9 @@
                     [tests :as tests]
                     [util :as util :refer [parse-long]]]
             [jepsen.os.debian :as debian]
-            [jepsen.redpanda [db :as db]
-                             [nemesis :as nemesis]]
+            [jepsen.redpanda [nemesis :as nemesis]]
+            [jepsen.redpanda.db [kafka :as db.kafka]
+                                [redpanda :as db.redpanda]]
             [jepsen.redpanda.workload [list-append :as list-append]
                                       [queue :as queue]]
             [slingshot.slingshot :refer [try+ throw+]])
@@ -169,7 +170,9 @@
 (defn test-name
   "Takes CLI options and constructs a test name as a string."
   [opts]
-  (str (short-version opts)
+  (str (case (:db opts)
+         :kafka "kafka"
+         :redpanda (str "redpanda " (short-version opts)))
        " " (name (:workload opts))
        " "
        (->> opts :sub-via (map name) sort (str/join ","))
@@ -193,7 +196,9 @@
   (info :version (pr-str (:version opts)))
   (let [workload-name (:workload opts)
         workload      ((workloads workload-name) opts)
-        db            (db/db)
+        db            (case (:db opts)
+                        :redpanda (db.redpanda/db)
+                        :kafka    (db.kafka/db))
         nemesis       (nemesis/package
                         {:db        db
                          :nodes     (:nodes opts)
@@ -262,6 +267,11 @@
     :default 30
     :parse-fn read-string
     :validate [#(and (number? %) (pos? %)) "must be a positive number"]]
+
+   [nil "--db TYPE" "Which DB do we test? Either `redpanda` (default) or `kafka`"
+    :default :redpanda
+    :parse-fn keyword
+    :validate [{:kafka :redpanda} "Must be either kafka or redpanda"]]
 
    [nil "--db-targets TARGETS" "A comma-separated list of nodes to pause/kill/etc; e.g. one,all"
     ;:default [:primaries :all]
