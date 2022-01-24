@@ -2045,6 +2045,7 @@
     (->> (select-keys errors [:inconsistent-offsets :duplicate :lost-write])
          (mapcat val)
          (map :key)
+         (concat (->> errors :unseen :unseen keys))
          distinct
          (pmap (fn [k]
                  (let [svg (key-order-viz k
