@@ -394,7 +394,6 @@
         nemeses (if (nil? (:nemesis opts))
                   standard-nemeses
                   [{}])]
-    (mapv (comp println :name)
     (for [i         (range (:test-count opts))
           version   versions
           workload  workloads
@@ -410,7 +409,6 @@
           (assoc :workload workload, :version version, :txn txn)
           (merge nemesis)
           redpanda-test))))
-  nil)
 
 (defn -main
   "CLI entry point."
