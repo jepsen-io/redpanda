@@ -178,6 +178,12 @@
   [^java.lang.AutoCloseable c]
   (.close c))
 
+(defn close-consumer!
+  "Closes a consumer *immediately*. The default close claims it only blocks
+  30s, but I've seen it deadlock for an hour."
+  [^KafkaConsumer c]
+  (.close c (ms->duration 0)))
+
 (defn close-producer!
   "Closes a producer *immediately*, without waiting for incomplete requests."
   [^KafkaProducer p]

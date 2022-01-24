@@ -124,7 +124,7 @@
   (close! [this test]
     (rc/close! admin)
     (rc/close-producer! producer)
-    (rc/close! consumer)))
+    (rc/close-consumer! consumer)))
 
 (defn client
   "Constructs a fresh client for this workload."

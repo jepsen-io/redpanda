@@ -684,7 +684,7 @@
   (close! [this test]
     (rc/close! admin)
     (rc/close-producer! producer)
-    (rc/close! consumer))
+    (rc/close-consumer! consumer))
 
   client/Reusable
   (reusable? [this test]
