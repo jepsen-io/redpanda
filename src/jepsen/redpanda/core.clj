@@ -194,7 +194,6 @@
 (defn redpanda-test
   "Constructs a test for RedPanda from parsed CLI options."
   [opts]
-  (info :version (pr-str (:version opts)))
   (let [workload-name (:workload opts)
         workload      ((workloads workload-name) opts)
         db            (case (:db opts)
@@ -370,7 +369,7 @@
 
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword
-    :default  :list-append
+    :default  :queue
     :validate [workloads (cli/one-of workloads)]]
 
   [nil "--[no-]ww-deps" "Enables or disables support for write-write dependency inference based on offsets in the queue workload. Redpanda allows write cycles everywhere. Disabling ww edges is helpful in hunting for pure wr cycles."
@@ -395,14 +394,23 @@
         nemeses (if (nil? (:nemesis opts))
                   standard-nemeses
                   [{}])]
-    (for [i (range (:test-count opts))
-          v  versions
-          w  workloads
-          n  nemeses]
+    (mapv (comp println :name)
+    (for [i         (range (:test-count opts))
+          version   versions
+          workload  workloads
+          nemesis   nemeses
+          txn       (case workload
+                      ; No txn support
+                      :list-append [false]
+                      ; Prefer CLI opts, or both true and false.
+                      :queue (if (nil? (:txn opts))
+                               [true false]
+                               [(:txn opts)]))]
       (-> opts
-          (assoc :workload w, :version v)
-          (merge n)
+          (assoc :workload workload, :version version, :txn txn)
+          (merge nemesis)
           redpanda-test))))
+  nil)
 
 (defn -main
   "CLI entry point."
