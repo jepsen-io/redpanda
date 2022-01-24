@@ -174,6 +174,7 @@
          :kafka "kafka"
          :redpanda (str "redpanda " (short-version opts)))
        " " (name (:workload opts))
+       (when (:txn opts) " txn")
        " "
        (->> opts :sub-via (map name) sort (str/join ","))
        (when-let [acks (:acks opts)] (str " acks=" acks))

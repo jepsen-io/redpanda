@@ -88,15 +88,15 @@
                       (str/join "\n"))]
         (c/exec :echo conf :>> zk-config))
 
-      (c/trace
       ; Replace Kafka node ID
-      (c/exec :sed :-i :-e (str "s/broker\\.id=.*/broker.id=" id "/") kafka-config))
+      (c/exec :sed :-i :-e (str "s/broker\\.id=.*/broker.id=" id "/") kafka-config)
       ; Set internal replication factors
       (c/exec :sed :-i :-e "s/offsets\\.topic\\.replication\\.factor=.*/offsets.topic.replication.factor=3/" kafka-config)
       (c/exec :sed :-i :-e "s/transaction\\.state\\.log\\.replication\\.factor=.*/transaction.state.log.replication.factor=3/" kafka-config)
       (c/exec :sed :-i :-e "s/transaction\\.state\\.log\\.min\\.isr=.*/transaction.state.log.min.isr=3/" kafka-config)
       ; And rebalance delay, to speed up startup
       (c/exec :sed :-i :-e "s/group\\.initial\\.rebalance\\.delay\\.ms=.*/group.initial.rebalance.delay.ms=3000/" kafka-config)
+
       ; And data dir
       (c/exec :sed :-i :-e (str "s/log\\.dirs=.*/log.dirs="
                                 (str/escape kafka-data {\/ "\\/"})
@@ -111,6 +111,9 @@
                        (str "default.replication.factor=" r)))
                    ; Default ISR is too weak
                    "min.insync.replicas=2"
+                   ; Shorten ZK timeouts, or else Kafka will take forever to
+                   ; recover from faults
+                   "zookeeper.session.tmeout.ms=1000"
                    ; ZK nodes
                    (->> (:nodes test)
                         (map (fn [node] (str node ":2181")))
@@ -118,6 +121,34 @@
                         (str "zookeeper.connect="))]
             lines (str/join "\n" lines)]
         (c/exec :echo lines :>> kafka-config)))))
+
+(defn start-zk!
+  "Starts zookeeper."
+  []
+  (c/su
+    (cu/start-daemon! {:chdir dir
+                       :logfile zk-log-file
+                       :pidfile zk-pid-file}
+                      zk
+                      zk-config)))
+
+(defn kill-zk!
+  "Kills zookeeper."
+  []
+  (c/su
+    (cu/stop-daemon! zk zk-pid-file)
+      (try+
+        (c/exec (c/env {:SIGNAL "KILL"})
+                (str dir "/bin/zookeeper-server-stop.sh"))
+        (catch [:exit 1] e
+          (if (re-find #"No zookeeper server to stop" (:out e))
+            nil
+            (throw+ e)))
+        (catch [:exit 127] e
+          (if (re-find #"No such file or directory" (:err e))
+            ; First run
+            nil
+            (throw+ e))))))
 
 (defrecord DB [node-ids]
   db/DB
@@ -128,21 +159,20 @@
 
     (install! test)
     (configure! test node)
+    (start-zk!)
+    (jepsen/synchronize test)
+
     (db/start! this test node))
 
   (teardown! [this test node]
     (db/kill! this test node)
+    (kill-zk!)
     (c/su
       (c/exec :rm :-rf dir)))
 
   db/Process
   (start! [this test node]
     (c/su
-      (cu/start-daemon! {:chdir dir
-                         :logfile zk-log-file
-                         :pidfile zk-pid-file}
-                        zk
-                        zk-config)
       (cu/start-daemon! {:chdir   dir
                          :logfile kafka-log-file
                          :pidfile kafka-pid-file}
@@ -152,17 +182,25 @@
   (kill! [this test node]
     (c/su
       (cu/stop-daemon! kafka kafka-pid-file)
-      (cu/stop-daemon! zk    zk-pid-file)
-      (cu/grepkill! "java")))
+      (try+
+        (c/exec (c/env {:SIGNAL "KILL"})
+                (str dir "/bin/kafka-server-stop.sh"))
+        (catch [:exit 1] e
+          (if (re-find #"No kafka server to stop" (:out e))
+            nil
+            (throw+ e)))
+        (catch [:exit 127] e
+          (if (re-find #"No such file or directory" (:err e))
+            ; First run
+            nil
+            (throw+ e))))))
 
   db/Pause
   (pause! [this test node]
-    (c/su
-      (cu/grepkill! :stop :java)))
+    )
 
   (resume! [this test node]
-    (c/su
-      (cu/grepkill! :cont :java)))
+    )
 
   db/LogFiles
   (log-files [this test node]
