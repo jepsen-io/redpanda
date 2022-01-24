@@ -2422,6 +2422,36 @@
           :poll-skip             (take-last 8  (sort-by :delta errs))
           errs))})])
 
+(defn allowed-error-types
+  "Redpanda does a lot of *things* that are interesting to know about, but not
+  necessarily bad or against-spec. For instance, g0 cycles are normal in the
+  Kafka transactional model, and g1c is normal with wr-only edges at
+  read-uncommitted but *not* with read-committed. This is a *very* ad-hoc
+  attempt to encode that so that Jepsen's valid/invalid results are somewhat
+  meaningful.]
+
+  Takes a test, and returns a set of keyword error types (e.g. :poll-skip)
+  which this test considers allowable."
+  [test]
+  (cond-> #{; int-send-skip is normal behavior: transaction writes interleave
+            ; constantly in the Kafka transaction model. We don't even bother
+            ; looking at external send skips.
+            :int-send-skip
+            ; Likewise, G0 is always allowed, since writes are never isolated
+            :G0 :G0-process :G0-realtime
+            }
+
+            ; With subscribe, we expect external poll skips and nonmonotonic
+            ; polls, because our consumer might be rebalanced between
+            ; transactions. Without subscribe, we expect consumers to proceed
+            ; in order.
+            (:subscribe (:sub-via test)) (conj :poll-skip :nonmonotonic-poll)
+
+            ; When we include ww edges, G1c is normal--the lack of write
+            ; isolation means we should expect cycles like t0 <ww t1 <wr t0.
+            (:ww-deps test) (conj :G1c :G1c-process :G1c-realtime)
+            ))
+
 (defn checker
   []
   (reify checker/Checker
@@ -2438,7 +2468,11 @@
                                  (filter (comp #{:info} :type))
                                  (filter (comp #{:txn :send :poll} :f))
                                  (map :error)
-                                 distinct)]
+                                 distinct)
+            ; Which errors are bad enough to invalidate the test?
+            bad-error-types (->> (keys errors)
+                                 (remove (allowed-error-types test))
+                                 sort)]
         ; Render plots
         (render-order-viz!   test analysis)
         (plot-unseen!        test unseen opts)
@@ -2450,10 +2484,11 @@
         (->> errors
              (map (partial condense-error test))
              (into (sorted-map))
-             (merge {:valid?             (empty? errors)
+             (merge {:valid?             (empty? bad-error-types)
                      :worst-realtime-lag (-> worst-realtime-lag
                                              (update :time nanos->secs)
                                              (update :lag nanos->secs))
+                     :bad-error-types    bad-error-types
                      :error-types        (sort (keys errors))
                      :info-txn-causes    info-txn-causes}))))))
 
