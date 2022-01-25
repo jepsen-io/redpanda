@@ -1,7 +1,7 @@
 (ns jepsen.redpanda.db-test
   (:require [clojure [test :refer :all]]
             [clojure.tools.logging :refer [info warn]]
-            [jepsen.redpanda.db :refer :all]
+            [jepsen.redpanda.db.redpanda :refer :all]
             [slingshot.slingshot :refer [try+ throw+]]))
 
 (deftest cluster-info-parser-test
