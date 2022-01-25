@@ -592,7 +592,7 @@
                       :a-mop-index 0, :b-mop-index 1}
                      {:type :wr, :key :y, :value :b,
                       :a-mop-index 0, :b-mop-index 1}]}]
-           (-> [t1 t2 t1' t2'] analysis :errors :G1c)))))
+           (-> [t1 t2 t1' t2'] analysis :errors pprint :G1c)))))
 
 (deftest g1c-ww-wr-test
   ; Transaction t1 writes something which is followed by a write of t2, but

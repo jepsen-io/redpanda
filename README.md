@@ -98,6 +98,532 @@ for CI or farming out tests to lots of clusters.
 All three of these commands provide docs for all of their options: try `lein
 run test -h` for help on running a single test.
 
+## Understanding Results
+
+In each test directory in `store/` you'll find several files. For starters, there's one directory for every DB node, which contains:
+
+- `data.tar.bz2`: a tarball of that node's Redpanda data directory
+- `redpanda.log`: the stdout/stderr logs of the Redpanda server
+- `tcpdump.pcap`: If running with `--tcpdump`, a packet capture file of this node's kafka-protocol network traffic.
+
+Three files show the chronology of the test. `jepsen.log` has the full output
+of the test run--everything printed to the console. `history.edn` is a
+machine-readable file with all the logical operations Jepsen performed during
+the test. `history.txt` is the same, but as a tab-aligned text file.
+
+`latency-raw.png` and `latency-quantiles.png` show the latency of each
+operation over time. Colors denote successful (ok), failed (fail), or unknown
+(info) operations. Shape denotes the logical function `:f` of that
+operation--for example, a `poll`, `subscribe`, `txn`. Nemesis activity is shown as colored bars along the top of the plot, and vertical lines whenever the nemesis changes something.
+
+`rate.png` shows the rate of requests per second, over time, with the same shapes and colors as the latency plot.
+
+`unseen.png` shows the number of messages which were committed but not read by
+any poller over time, broken out by key (partition-topic). Two final vertical
+lines show the start and stop of the final polling period, when the cluster has
+healed and we're trying to read all writes. This graph should go to zero
+relatively quickly during the recovery window: if it doesn't, that suggests
+some writes have been lost or are severely delayed.
+
+`realtime-lag` plots shows how far behind the most recent committed write each
+consumer is, over time. These come in several families, aggregated by key, by
+worker thread (which maps to one client at any given time), or by neither.
+Whenever we subscribe or assign a fresh topic, this might jump up, but it
+should head down as consumers catch up to the most recent values. You can use
+these plots to identify whether a single key or single thread has gotten stuck,
+and whether other threads or keys are making progress.
+
+`test.fressian` and `test.jepsen` have binary representations of the test in
+its entirety.
+
+`elle/` shows cycles between transactions, both as text files and as svg graphs. These are categorized by anomaly type--e.g. G0, G1c, etc.
+
+`orders` appears whenever we see Weird Things Happen on some key. It contains
+one SVG file for each key that did something odd, and shows the view of each
+`ok` operation into that particular key's offsets. Time flows top to bottom,
+and offsets are arranged left to right. Each number is the value of the message
+at that particular offset. Hovering over any row shows more information. This
+is helpful for understanding when there are reorderings or message loss.
+
+`results.edn` has the results of the checker.
+
+### Results In Depth
+
+`results.edn` is a map with several keys. At each layer, the `:valid?` key says
+whether the results (or part thereof) were considered valid, or if an anomaly was detected.
+
+The `stats` part of the analysis provides overall statistics on the number of
+operations, how many were successful (ok), failed (fail), or indeterminate
+(info). These are also broken down by function, so you can see the behavior of
+(e.g.) just `poll` operations.
+
+```clj
+{:stats {:valid? true,
+         :count 14772,
+         :ok-count 14653,
+         :fail-count 0,
+         :info-count 119,
+         :by-f {:assign {:valid? true,
+                         :count 1901,
+                         :ok-count 1901,
+                         :fail-count 0,
+                         :info-count 0},
+                :crash {:valid? false,
+                        :count 8,
+                        :ok-count 0,
+                        :fail-count 0,
+                        :info-count 8},
+                :debug-topic-partitions {:valid? true,
+                                         :count 8,
+                                         :ok-count 8,
+                                         :fail-count 0,
+                                         :info-count 0},
+                :poll {:valid? true,
+                       :count 6551,
+                       :ok-count 6551,
+                       :fail-count 0,
+                       :info-count 0},
+                :send {:valid? true,
+                       :count 6304,
+                       :ok-count 6193,
+                       :fail-count 0,
+                       :info-count 111}}},
+```
+
+`clock` and `perf` are trivially true; they generate the clock, latency, and
+rate plots as a side effect.
+
+```clj
+ :clock {:valid? true},
+ :perf {:latency-graph {:valid? true},
+        :rate-graph {:valid? true},
+        :valid? true},
+```
+
+`ex` tracks exceptions thrown by Jepsen Clients during the test. When
+exceptions appear here, you may want to add them to the error handling in that
+particular client. It is, in general, always safe to allow them to
+throw---explicitly handling these errors improves test specificity and
+performance.
+
+`assert` looks for assertion errors thrown by the Redpanda server, by parsing
+logfiles.
+
+`workload` contains workload-specific results.
+
+#### Queue results
+
+The queue workload includes two important keys: `:error-types`, which shows all
+"interesting" behaviors observed during the test, and `:bad-error-types`, which
+are those we think are specifically illegal given the test being run. For
+example:
+
+            :error-types (:G0
+                          :duplicate
+                          :int-nonmonotonic-poll
+                          :int-poll-skip
+                          :poll-skip),
+            :bad-error-types (:duplicate
+                              :int-nonmonotonic-poll
+                              :int-poll-skip
+                              :poll-skip)},
+
+Here we detected a G0 anomaly, but because those happen *normally* in the Kafka
+transaction model, we didn't flag it as a "bad" error. The duplicate, internal
+nonmonotonic polls and poll skips, and external poll skips, caused this test to
+fail.
+
+Each error type has a corresponding key in `:errors` part of the workload
+results. Examples of each type of error follow. For simplicity, these examples
+are drawn from the test suite's internal tests; they use keys like `:x` rather
+than integers, but should otherwise be structurally alike to those reported by
+the real test harness.
+
+`:inconsistent-offsets` signifies that a single offset in some key's log
+contained multiple values. The offset-value mapping, called a `version order`,
+is derived from both send and poll operations. This example tells us that key
+`:x`, at offset 0, contained both values `1` and `2`. `:index` is a dense
+offset, without gaps.
+
+```clj
+{:inconsistent-offsets
+ ({:key :x, :offset 0, :index 0, :values #{1 2}})}
+```
+
+`:G1a` reports cases where an operation definitely failed, but one of its
+writes appeared in a poll operation. For instance, this error shows that on key
+`:x`, value `2` was written by a send operation which failed, but that send was
+later observed by `:reader`.
+
+```clj
+{:G1a
+ ({:key :x,
+   :value 2,
+   :writer
+   {:index 1,
+    :time 1,
+    :process 0,
+    :type :fail,
+    :f :send,
+    :value [[:send :x 2] [:send :y 3]]},
+   :reader
+   {:index 3,
+    :time 3,
+    :process 1,
+    :type :ok,
+    :f :poll,
+    :value [[:poll {:x [[0 2]]}]]}})}
+```
+
+`:lost-write` finds cases where a known-successful send occurs at offset a, and
+some offset b (such that a < b) is polled, and the message at offset a never
+appears to any poll. This example shows that on key `:x`, value `:a` was lost.
+It was written at index 0 in the log for `:x`, and the highest index which was
+observed in some poll was 2. The writer of value `:a` is given, and so is the
+reader which polled index 2. Because we expect pollers (across all consumers,
+at least) observe values without gaps, this read of offset 2 implies we should
+also have read offset 0--and yet no such read was found in this history.
+
+```clj
+{:lost-write
+ ({:key :x,
+   :value :a,
+   :index 0,
+   :max-read-index 2,
+   :writer
+   {:index 1,
+    :time 1,
+    :process 0,
+    :type :ok,
+    :f :send,
+    :value [[:send :x [0 :a]]]},
+   :max-read
+   {:index 7,
+    :time 7,
+    :process 0,
+    :type :ok,
+    :f :poll,
+    :value [[:poll {:x [[2 :c]]}]]}}
+```
+
+Note that this analysis is sophisticated enough to reason about inconsistent
+offsets conservatively. Not all parts of the checker do this, but lost-writes
+is careful to keep track of multiple indexes for a given message value, and
+multiple values at a given index.
+
+The lost-write checker also helps verify transactional atomicity: reading one
+part of a transaction lets the checker prove that all the other writes must
+have been written also---even if the writing transaction was itself
+indeterminate.
+
+`:poll-skip` finds places where a poller unexpectedly jumps over some offsets in
+the log during two successive calls to `poll` performed by *different*
+operations on the same client, and there was no call to `assign` or `subscribe`
+between those polls which would have caused the consumer to forget the offset
+it was tracking. This example shows that on key `:x`, a single consumer jumped
+2 indexes forward in the log, skipping over value `:c`. The two operations are
+shown: the first polled `:a` and `:b` at indexes 1 and 2, and the second polled
+`:d` at index 4. The checker here knew that there existed a value `:c` at index
+3 between these two polls, which went unobserved. `:delta` is the number of
+indexes between the two polls--if pollers read in perfect order, we'd expect
+this to always be 1.
+
+```clj
+{:poll-skip
+ ({:key :x,
+   :delta 2,
+   :skipped (:c),
+   :ops
+   [{:index 1,
+     :time 1,
+     :process 0,
+     :type :ok,
+     :f :poll,
+     :value [[:poll {:x [[1 :a] [2 :b]]}]]}
+    {:index 7,
+     :time 7,
+     :process 0,
+     :type :ok,
+     :f :poll,
+     :value [[:poll {:x [[4 :d]]}]]}]})}
+```
+
+`:int-poll-skip` finds the same thing, but inside a single operation. This is
+helpful for detecting anomalies that could occur inside a single transaction.
+For instance, this error shows that on key `x`, a single transaction polled values `:a` and `:d` in sequence, which skipped over `:b`.
+
+```clj
+{:int-poll-skip
+ ({:key :x,
+   :values [:a :d],
+   :delta 2,
+   :skipped (:b),
+   :op
+   {:index 3,
+    :time 3,
+    :process 0,
+    :type :ok,
+    :f :poll,
+    :value [[:poll {:x [[1 :a] [4 :d]]}]]}})}
+```
+
+`:nonmonotonic-poll` finds cases where a single consumer, without changing its
+assign/subscribe mapping for some key, performed subsequent calls to `poll` and
+observed values in the second poll which started at or before the previous poll
+finished. For instance, this error shows two successive operations on the same consumer which polled values `:c` then `:b`, jumping back one index.
+
+```clj
+{:nonmonotonic-poll
+ ({:key :x,
+   :values [:c :b],
+   :delta -1,
+   :ops
+   [{:index 3,
+     :time 3,
+     :process 0,
+     :type :ok,
+     :f :poll,
+     :value [[:poll {:x [[1 :a] [2 :b] [3 :c]]}]]}
+    {:index 7,
+     :time 7,
+     :process 0,
+     :type :ok,
+     :f :poll,
+     :value [[:poll {:x [[2 :b] [3 :c] [4 :d]]}]]}]})}
+```
+
+`:int-nonmonotonic-poll` does the same, but inside a single operation. For
+instance, this error shows that on key `:x`, a single process went from reading offset 3 (`:c`) to offset 1 (`:a`), jumping two indices backwards in the log.
+
+```clj
+{:int-nonmonotonic-poll
+ ({:key :x,
+   :values [:c :a],
+   :delta -2,
+   :op
+   {:index 3,
+    :time 3,
+    :process 0,
+    :type :ok,
+    :f :poll,
+    :value [[:poll {:x [[3 :c] [1 :a]]}]]}})}
+```
+
+`:int-send-skip` looks for a single transaction which performs two subsequent
+sends to the same key, and some other offset lands *between* those writes. This
+is another way to detect G0 cycles, where writes interleave with one another.
+In this example, a single transaction wrote `:a` and `:c` to key `:x`, skipping
+over message `:b` from another transaction. This shows a lack of write
+isolation between Kafka/Redpanda transactions, and appears to be normal
+behavior.
+
+```clj
+{:int-send-skip
+ ({:key :x,
+   :values [:a :c],
+   :delta 2,
+   :skipped (:b),
+   :op
+   {:index 1,
+    :time 1,
+    :process 0,
+    :type :ok,
+    :f :send,
+    :value [[:send :x [1 :a]] [:send :x :c]]}})},
+```
+
+`:nonmonotonic-send` finds cases where two subsequent operations on the same
+producer sent values to the same key, and the latter message wound up at an
+offset *prior* to the former message. For instance, this case shows that on key
+`:x`, two calls to `send` on the same producer, split across two different
+operations, wrote offsets out of order. The second operation's first send of
+`:a` landed three indices before the first operation's final send of `:d`.
+
+```clj
+{:nonmonotonic-send
+ ({:key :x,
+   :values [:d :a],
+   :delta -3,
+   :ops
+   [{:index 1,
+     :time 1,
+     :process 0,
+     :type :ok,
+     :f :send,
+     :value [[:send :x [3 :c]] [:send :x [4 :d]]]}
+    {:index 5,
+     :time 11,
+     :process 0,
+     :type :ok,
+     :f :send,
+     :value [[:send :x [1 :a]] [:send :x [2 :b]]]}]})}
+```
+
+`:int-nonmonotonic-send` is the same thing, but inside a single transaction.
+Here, two calls to send within a single transaction received offsets out of
+order on key `:x`.
+
+```clj
+{:int-nonmonotonic-send
+ ({:key :x,
+   :values [:c :a],
+   :delta -1,
+   :op
+   {:index 1,
+    :time 1,
+    :process 0,
+    :type :ok,
+    :f :send,
+    :value [[:send :x [3 :c]] [:send :x [1 :a]]]}}
+```
+
+`:duplicate` occurs when a single value appears at multiple offsets in some key's log. Since we only ever insert unique values, and do not (above the level of the Kafka producer's internal retries) ever retry, we expect that each value appear at most once per key. This example shows that on key `:x`, value `:a` appeared at two distinct offsets.
+
+```clj
+{:duplicate ({:key :x, :value :a, :count 2})}
+```
+
+`:unseen` reports the number of messages which were successfully committed but
+have not appeared in any poll, as of the last poll in the history. This checker
+cannot distinguish between a lost write vs one which is simply very delayed. To
+mitigate this weakness, we try *really hard* to read everything at the end of a
+test---but that's still not a guarantee that `:unseen` errors are truly lost.
+Sure, they texted "omw" three hours ago and still haven't shown up to Show
+Tunes at Sidetrack, but they might not be dead. Maybe they're watching a sixth
+episode of Golden Girls and trying to figure out which high tops to wear. We
+don't judge.
+
+This example includes the time (in nanoseconds since the start of the test) of
+the final unseen inference, a map `:unseen` of keys to the number of unseen
+messages on each key, and a map `:messages` of keys to the specific messages
+unseen. This test failed to observe one committed message on key 6, and 5 on
+key 23.
+
+```clj
+{:unseen {:time 1256465220303,
+          :unseen {6 1, 23 5},
+          :messages {6 (311),
+                     23 (360 361 362 363 365)}}}
+```
+
+`:G0` finds write cycles: a cluster of transactions such that each wrote some
+message both before *and* after every other transaction in the cluster. A data
+structure representation is included in the workload. Here, for instance, a
+pair of transactions had a cycle where T1 wrote before T2 on key `:x`, and
+vice-versa on key `:y`. The `:cycle` key shows the operations involved: [T1,
+T2, T1]. The `:steps` field explains the relationships between successive pairs
+in that cycle. The first relationship was a write-write (`:ww`) dependency on key `:x`, where the first transaction wrote message `:a` and the second wrote message `:b`.
+
+```clj
+{:G0
+ [{:cycle
+   [{:index 2,
+     :time 2,
+     :process 0,
+     :type :ok,
+     :f :send,
+     :value [[:send :x [0 :a]] [:send :y [1 :a]]]}
+    {:index 3,
+     :time 3,
+     :process 1,
+     :type :ok,
+     :f :send,
+     :value [[:send :x [1 :b]] [:send :y [0 :b]]]}
+    {:index 2,
+     :time 2,
+     :process 0,
+     :type :ok,
+     :f :send,
+     :value [[:send :x [0 :a]] [:send :y [1 :a]]]}],
+   :steps
+   ({:type :ww,
+     :key :x,
+     :value :a,
+     :value' :b,
+     :a-mop-index 0,
+     :b-mop-index 0}
+    {:type :ww,
+     :key :y,
+     :value :b,
+     :value' :a,
+     :a-mop-index 1,
+     :b-mop-index 1}),
+   :type :G0}]}
+```
+
+This can be a bit hard to understand from the data structure representation,
+but you'll find corresponding plain-English and visual diagrams explaining this
+cycle in `elle/G0.txt` and `elle/g0/`.
+
+`:G1c` finds circular information flow: clusters where a cycle exists composed
+of write-read and write-write dependencies. As in G0, write-write dependencies
+are inferred from offsets written. Write-read dependencies are inferred
+whenever one transaction polls another's sent messages. This G1c is comprised
+entirely of write-read dependencies---note the `:wr` types in each step. The
+first transaction sent `:a` to key `:x`, which was read by the second
+transaction. The second transaction sent `:b` to key `:y`, which was read by
+the first. Like G0, textual and visual explanations of this anomaly are
+available in the `elle/` directory.
+
+```clj
+{:G1c
+ [{:cycle
+   [{:index 2,
+     :time 2,
+     :process 0,
+     :type :ok,
+     :f :txn,
+     :value [[:send :x [0 :a]] [:poll {:y [[0 :b]]}]]}
+    {:index 3,
+     :time 3,
+     :process 1,
+     :type :ok,
+     :f :txn,
+     :value [[:send :y [0 :b]] [:poll {:x [[0 :a]]}]]}
+    {:index 2,
+     :time 2,
+     :process 0,
+     :type :ok,
+     :f :txn,
+     :value [[:send :x [0 :a]] [:poll {:y [[0 :b]]}]]}],
+   :steps
+   ({:type :wr, :key :x, :value :a, :a-mop-index 0, :b-mop-index 1}
+    {:type :wr, :key :y, :value :b, :a-mop-index 0, :b-mop-index 1}),
+   :type :G1c}]}
+```
+
+Note that both G0 and G1c cycles involving write-write edges may or may not be
+"real" depending on how you interpret Kafka's `producer.send` semantics. If you
+prefer to ignore these write dependencies, pass `--no-ww-deps` to the test, and
+it'll *only* infer write-read edges.
+
+Queue tests also generate an additional file, `consume-counts.edn`. This file
+attempts---perhaps poorly---to tell whether a history offered "exactly once
+semantics". It looks at all successful operations which performed a poll
+operation while using `subscribe` (not `assign`, which we expect leads to
+duplicate polls!), and counts the number of times each value was polled. Under
+exactly-once semantics, I think this number should always be 1, but we were
+never able to get this to work.
+
+This file has two keys. `:distribution` is a map of counts (i.e. how many times
+a record was polled) to the number of times that count occurred. `:dup-counts`
+is a map of keys (topic-partitions) to values to the number of times that value
+was polled, for any values which were polled multiple times. For examples, this test had 17133 messages which were polled once, and 174 which were polled twice. Key 2 had a single duplicate, message 79, which was saw twice.
+
+```clj
+{:distribution {1 17133, 2 174},
+ :dup-counts
+ {2 {79 2},
+  3
+  {111 2,
+   112 2,
+   113 2,
+   114 2,
+   ...}
+ ...}}
+```
+
+
 ## What's Here
 
 ### Overall Structure
