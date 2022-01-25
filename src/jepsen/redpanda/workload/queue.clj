@@ -311,9 +311,8 @@
   well as the one thrown during the abort process. This function takes a
   client, whether we're aborting before or after calling commit, and an
   exception thrown by the transaction body (the reason why we're aborting in
-  the first place). Tries to abort the transaction on the current producer. If
-  the abort succeeds, resets the consumer to the last committed offsets as
-  known to the server. Then throws a map of:
+  the first place). Tries to abort the transaction on the current producer.
+  Then throws a map of:
 
     {:type          :abort
      :abort-ok?     True if we successfully aborted, false if the abort threw.
@@ -324,7 +323,16 @@
                     false, the transaction may have taken place.}"
   [client tried-commit?, body-error]
   (try (rc/abort-txn! (:producer client))
-       (rc/reset-to-last-committed-positions! (:consumer client))
+       ; The example we're following for transactional workloads resets the
+       ; committed offsets for the consumer on abort. It might *seem* like we
+       ; should do this, but it might also create new weird behavior where
+       ; the poller jumps over records. Part of the reason they do this in the
+       ; EOS demo is because they're using some external consumer group stuff
+       ; to ensure there's no concurrent consumers, and we're *not* doing that
+       ; here. I'm not sure whether we should include this or not--it doesn't
+       ; seem to have a huge effect on safety, so I'm leaving it here for y'all
+       ; to consider later.
+       ; (rc/reset-to-last-committed-positions! (:consumer client))
        (catch RuntimeException abort-error
          ; But of course the abort can crash! We throw a wrapper exception
          ; which captures both the abort error and the error thrown from the
