@@ -800,9 +800,10 @@
         [op (TrackKeyOffsets. gen' offsets)])))
 
   (update [this test context event]
-    (let [op-offsets (op->max-offsets event)]
-      (when-not (empty? op-offsets)
-        (swap! offsets #(merge-with max % op-offsets))))
+    (when (= :ok (:type event))
+      (let [op-offsets (op->max-offsets event)]
+        (when-not (empty? op-offsets)
+          (swap! offsets #(merge-with max % op-offsets)))))
     (TrackKeyOffsets.
       (gen/update gen test context event) offsets)))
 
