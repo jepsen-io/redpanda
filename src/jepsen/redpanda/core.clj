@@ -362,7 +362,7 @@
 
    [nil "--tcpdump" "If set, grabs tcpdump traces of client->server traffic on each node."]
 
-   [nil "--txn" "Enables transactions for the queue workload."]
+   [nil "--[no-]txn" "Enables transactions for the queue workload."]
 
    ["-v" "--version STRING" "What version of Redpanda should we install? See apt list --all-versions redpanda for a full list of available versions."
     :default "21.10.1-1-e7b6714a"]
