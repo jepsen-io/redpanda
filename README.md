@@ -61,12 +61,10 @@ the test detects an error. This might emit something like:
                         :errs ({:key 8, :value 711, :count 2})},
 ```
 
-If we run the test against version 21.11.2, we should no longer see duplicates
-or inconsistent offsets. Instead, we might observe lost/stale messages,
-reported as `unseen`:
+Or we could run the test against version 21.11.2, with process crashes and membership changes, and for significantly longer. This should, after a few hours, demonstrate lost/stale messages, reported as `unseen`:
 
 ```
-lein run test --nodes-file ~/nodes --username admin --nemesis pause,kill --time-limit 300 --test-count 5 --version 21.11.2-1-f58e69b6
+lein run test --nodes-file ~/nodes --username admin -s --no-ww-deps --nemesis kill,membership --time-limit 1000 --test-count 10 --version 21.11.2-1-f58e69b6
 ```
 
 To start a web server which lets you browse the results of these tests on port
