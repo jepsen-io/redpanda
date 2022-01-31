@@ -662,6 +662,32 @@ topic-partitions, creating new topics once existing topics reach a certain
 threshold of writes. You can choose which workload is run via `-w queue` or `-w
 list-append`.
 
+### Faults
+
+`--nemesis pause,kill` performs randomized process pauses and kill -9. The
+other fault types are `clock`, which jitters clocks around, `partition`, which
+partitions the network between DB nodes (but not between clients and servers!),
+and `membership`, which adds and politely removes nodes from the cluster.
+
+Note that clock skew tests will only work on nodes which have real
+clocks---Docker and LXC can't change the system clock.
+
+Note also that the membership nemesis in the main branch only works with new
+APIs introduced after 21.11.2; tests using `--nemesis membership` will still
+run with versions 21.11.2, but won't actually remove nodes, and will complain a
+lot. Use `git checkout compat-21.11.2` for the last version of the test suite
+which ran with 21.11.2's membership APIs. Note that this membership nemesis may
+drive the cluster into unsafe regimes, so watch its activity in `jepsen.log`
+carefully when verifying a failure.
+
+`--nemesis-interval 5` sets the mean interval between nemesis operations to 5
+seconds; see `latency.png` to get a sense of how this affects availability.
+``-db-targets` controls how DB-node related faults choose their targets;
+`--db-targets all`, for instance, kills and pauses *every* node at once,
+whereas `--db-targets one` only kills or pauses a single node at a time.
+`--partition-targets` controls how Jepsen chooses the topology of network
+partitions.
+
 ### Tests for Tests
 
 This test harness also comes with its own tests--mainly for the queue
