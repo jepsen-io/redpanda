@@ -1441,35 +1441,49 @@
     {:skip          A pair of poll values which read the same key and skip
                     over some part of the log which we know should exist.
      :nonmonotonic A pair of poll values which *contradict* the log order,
-                   or repeat the same value.}"
+                   or repeat the same value.}
+
+  When a transaction's rebalance log includes a key which would otherwise be
+  involved in one of these violations, we don't report it as an error: we
+  assume that rebalances invalidate any assumption of monotonically advancing
+  offsets."
   [{:keys [history version-orders]}]
   (->> history
-       (pmap (fn per-op [op]
-                 ; Consider each pair of reads of some key in this op...
-                 (->> (for [[k vs]  (op-reads op)
-                            [v1 v2] (partition 2 1 vs)]
-                        (let [{:keys [by-index by-value]} (get version-orders k)
-                              ; What are their indices in the log?
-                              i1 (get by-value v1)
-                              i2 (get by-value v2)
-                              delta (if (and i1 i2)
-                                      (- i2 i1)
-                                      1)]
-                          (cond (< 1 delta)
-                                {:type     :skip
-                                 :key      k
-                                 :values   [v1 v2]
-                                 :delta    delta
-                                 :skipped  (map by-index (range (inc i1) i2))
-                                 :op       op}
+       (pmap
+         (fn per-op [op]
+           (let [rebalanced-keys (->> op :rebalance-log
+                                      (mapcat :keys)
+                                      set)]
+             ; Consider each pair of reads of some key in this op...
+             (->> (for [[k vs]  (op-reads op)
+                        [v1 v2] (partition 2 1 vs)]
+                    (let [{:keys [by-index by-value]} (get version-orders k)
+                          ; What are their indices in the log?
+                          i1 (get by-value v1)
+                          i2 (get by-value v2)
+                          delta (if (and i1 i2)
+                                  (- i2 i1)
+                                  1)]
+                      (cond ; If a key was rebalanced during the transaction,
+                            ; all bets are off.
+                            (rebalanced-keys k)
+                            nil
 
-                                (< delta 1)
-                                {:type    :nonmonotonic
-                                 :key     k
-                                 :values  [v1 v2]
-                                 :delta   delta
-                                 :op      op})))
-                      (remove nil?))))
+                            (< 1 delta)
+                            {:type     :skip
+                             :key      k
+                             :values   [v1 v2]
+                             :delta    delta
+                             :skipped  (map by-index (range (inc i1) i2))
+                             :op       op}
+
+                            (< delta 1)
+                            {:type    :nonmonotonic
+                             :key     k
+                             :values  [v1 v2]
+                             :delta   delta
+                             :op      op})))
+                  (remove nil?)))))
        (mapcat identity)
        (group-by :type)
        (map-vals strip-types)))
