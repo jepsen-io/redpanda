@@ -594,10 +594,11 @@
                        test)
                      node)]
       (assoc this
-             :node      node
-             :admin     (rc/admin test node)
-             :consumer  (rc/consumer test node)
-             :producer  producer)))
+             :node          node
+             :admin         (rc/admin test node)
+             :consumer      (rc/consumer test node)
+             :producer      producer
+             :rebalance-log (atom []))))
 
   (setup! [this test])
 
@@ -702,8 +703,7 @@
 (defn client
   "Constructs a fresh client for this workload."
   []
-  (map->Client {:extant-topics (atom #{})
-                :rebalance-log (atom [])}))
+  (map->Client {:extant-topics (atom #{})}))
 
 ;; Generator
 
