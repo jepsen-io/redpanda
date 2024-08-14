@@ -59,7 +59,7 @@
   [test]
   ; We ignore version and deb here; this is just a quick comparison against a
   ; hardcoded version.
-  (let [url (str "https://dlcdn.apache.org/kafka/3.0.0/kafka_2.13-3.0.0.tgz")]
+  (let [url (str "https://archive.apache.org/dist/kafka/3.0.0/kafka_2.13-3.0.0.tgz")]
     (c/su (cu/install-archive! url dir)
           ; Make data dirs
           (c/exec :mkdir :-p zk-data)
