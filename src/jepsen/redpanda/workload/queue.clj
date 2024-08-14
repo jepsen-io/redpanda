@@ -134,7 +134,6 @@
                   [util :refer [index-of]]
                   [rels :refer [ww wr rw]]]
             [gnuplot.core :as gnuplot]
-            [hiccup.core :as h]
             [jepsen [checker :as checker]
                     [client :as client]
                     [generator :as gen]
@@ -757,9 +756,5 @@
   ... plus those taken by jepsen.tests.cycle.append/test, e.g. :key-count,
   :min-txn-length, ..."
   [opts]
-  (let [workload (jepsen.tests.kafka/workload opts)
-                   (assoc opts
-                          ; TODO: don't hardcode these
-                          :max-txn-length (if (:txn opts) 4 1)))
-    (assoc workload :client (client)))
- 
+  (let [workload (jepsen.tests.kafka/workload opts)]
+    (assoc workload :client (client))))
