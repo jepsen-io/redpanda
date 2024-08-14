@@ -9,7 +9,7 @@
             [jepsen [control :as c :refer [|]]
                     [core :as jepsen]
                     [db :as db]
-                    [util :as util :refer [parse-long pprint-str meh]]]
+                    [util :as util :refer [pprint-str meh]]]
             [jepsen.control [net :as cn]
                             [util :as cu]]
             [jepsen.os.debian :as debian]

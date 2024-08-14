@@ -140,7 +140,6 @@
                     [util :as util :refer [map-vals
                                            meh
                                            nanos->secs
-                                           parse-long
                                            pprint-str]]]
             [jepsen.checker.perf :as perf]
             [jepsen.tests.cycle.append :as append]

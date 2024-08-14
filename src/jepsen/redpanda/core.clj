@@ -7,7 +7,7 @@
                     [cli :as cli]
                     [generator :as gen]
                     [tests :as tests]
-                    [util :as util :refer [parse-long]]]
+                    [util :as util :refer []]]
             [jepsen.os.debian :as debian]
             [jepsen.redpanda [nemesis :as nemesis]]
             [jepsen.redpanda.db [kafka :as db.kafka]
