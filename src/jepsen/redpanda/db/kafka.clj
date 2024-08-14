@@ -57,13 +57,16 @@
 (defn install!
   "Installs Kafka."
   [test]
-  ; We ignore version and deb here; this is just a quick comparison against a
-  ; hardcoded version.
-  (let [url (str "https://archive.apache.org/dist/kafka/3.0.0/kafka_2.13-3.0.0.tgz")]
-    (c/su (cu/install-archive! url dir)
-          ; Make data dirs
-          (c/exec :mkdir :-p zk-data)
-          (c/exec :mkdir :-p kafka-data))))
+  (c/su
+    ; We need java
+    (debian/install [:openjdk-17-jdk-headless])
+    ; We ignore version and deb here; this is just a quick comparison against a
+    ; hardcoded version.
+    (let [url (str "https://archive.apache.org/dist/kafka/3.0.0/kafka_2.13-3.0.0.tgz")]
+      (cu/install-archive! url dir)
+      ; Make data dirs
+      (c/exec :mkdir :-p zk-data)
+      (c/exec :mkdir :-p kafka-data))))
 
 (defn configure!
   "Writes config files"
@@ -114,6 +117,8 @@
                    ; Shorten ZK timeouts, or else Kafka will take forever to
                    ; recover from faults
                    "zookeeper.session.tmeout.ms=1000"
+                   ; Let us do short group timeouts
+                   "group.min.session.timeout.ms=1000"
                    ; ZK nodes
                    (->> (:nodes test)
                         (map (fn [node] (str node ":2181")))
