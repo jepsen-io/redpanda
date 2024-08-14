@@ -1,12 +1,12 @@
-(defproject io.jepsen/redpanda "0.1.1"
+(defproject io.jepsen/redpanda "0.1.2-SNAPSHOT"
   :description "Tests for the RedPanda distributed queuing system"
   :url "https://github.com/jepsen-io/redpanda"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
-  :dependencies [[org.clojure/clojure "1.10.3"]
-                 [clj-http "3.12.3"]
-                 [cheshire "5.10.2"]
-                 [jepsen "0.2.6"]
+  :dependencies [[org.clojure/clojure "1.11.4"]
+                 [clj-http "3.13.0"]
+                 [cheshire "5.13.0"]
+                 [jepsen "0.3.5"]
                  [org.apache.kafka/kafka-clients "3.0.0"]]
   :main jepsen.redpanda.core
   :test-selectors {:focus :focus}
