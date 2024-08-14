@@ -6,6 +6,7 @@
             [jepsen [checker :as checker]
                     [cli :as cli]
                     [generator :as gen]
+                    [history :as h]
                     [tests :as tests]
                     [util :as util :refer []]]
             [jepsen.os.debian :as debian]
@@ -160,11 +161,10 @@
     (reify checker/Checker
       (check [this test history opts]
         (checker/check c test
-                       (->> history
-                            (remove (comp #{:assign
-                                            :crash
-                                            :debug-topic-partitions}
-                                          :f)))
+                       (h/remove (h/has-f? #{:assign
+                                             :crash
+                                             :debug-topic-partitions})
+                                 history)
                        opts)))))
 
 (defn test-name
