@@ -564,7 +564,7 @@
   value of the atom.
 
   We do this Rather Weird Thing because Redpanda might actually give us
-  informatrion like offsets for `send` during a transaction which will later
+  information like offsets for `send` during a transaction which will later
   crash, and we want to preserve those offsets in the completed info op."
   [op & body]
   (assert (symbol? op))
@@ -587,13 +587,14 @@
                    rebalance-log]
   client/Client
   (open! [this test node]
-    (let [;tx-id    "jepsen-txn"
-          tx-id    (rc/new-transactional-id)
+    (let [tx-id    (rc/new-transactional-id)
+          producer-opts (assoc test :client-id (str "jepsen-" tx-id))
           producer (rc/producer
                      (if (:txn test)
                        (assoc test :transactional-id tx-id)
                        test)
                      node)]
+      (info "transactional-id" tx-id)
       (assoc this
              :node          node
              :admin         (rc/admin test node)

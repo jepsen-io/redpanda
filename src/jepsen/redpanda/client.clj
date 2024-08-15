@@ -152,6 +152,9 @@
     (not= nil (:retries opts))
     (assoc ProducerConfig/RETRIES_CONFIG (:retries opts))
 
+    (not= nil (:client-id opts))
+    (assoc ProducerConfig/CLIENT_ID_CONFIG (:client-id opts))
+
     (not= nil (:transactional-id opts))
     (assoc ProducerConfig/TRANSACTIONAL_ID_CONFIG (:transactional-id opts))))
 
