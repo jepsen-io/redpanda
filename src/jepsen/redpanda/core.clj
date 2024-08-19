@@ -174,7 +174,7 @@
          :kafka "kafka"
          :redpanda (str "redpanda " (short-version opts)))
        " " (name (:workload opts))
-       (when (:txn opts) " txn")
+       (when (:txn? opts) " txn")
        " "
        (->> opts :sub-via (map name) sort (str/join ","))
        (when-let [acks (:acks opts)] (str " acks=" acks))
@@ -362,7 +362,8 @@
 
    [nil "--tcpdump" "If set, grabs tcpdump traces of client->server traffic on each node."]
 
-   [nil "--[no-]txn" "Enables transactions for the queue workload."]
+   [nil "--[no-]txn" "Enables transactions for the queue workload."
+    :id :txn?]
 
    ["-v" "--version STRING" "What version of Redpanda should we install? See apt list --all-versions redpanda for a full list of available versions."
     :default "21.10.1-1-e7b6714a"]
@@ -402,11 +403,11 @@
                       ; No txn support
                       :list-append [false]
                       ; Prefer CLI opts, or both true and false.
-                      :queue (if (nil? (:txn opts))
+                      :queue (if (nil? (:txn? opts))
                                [true false]
-                               [(:txn opts)]))]
+                               [(:txn? opts)]))]
       (-> opts
-          (assoc :workload workload, :version version, :txn txn)
+          (assoc :workload workload, :version version, :txn? txn)
           (merge nemesis)
           redpanda-test))))
 

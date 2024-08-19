@@ -361,8 +361,8 @@
            :body-error     body-error}))
 
 (defmacro with-txn
-  "Takes a test, a client, an operation, and a body. If (:txn test) is false,
-  evaluates body. If (:txn) test is true, evaluates body in a transaction:
+  "Takes a test, a client, an operation, and a body. If (:txn? test) is false,
+  evaluates body. If (:txn? test) is true, evaluates body in a transaction:
   beginning the transaction before the body begins, committing the transaction
   once the body completes, and handling errors appropriately.
 
@@ -390,7 +390,7 @@
         `[(catch ProducerFencedException     e# (throw e#))
           (catch OutOfOrderSequenceException e# (throw e#))
           (catch AuthorizationException      e# (throw e#))]]
-    `(if-not (:txn ~test)
+    `(if-not (:txn? ~test)
        ; Not a transaction; evaluate normally.
        (do ~@body)
        ; Great, we're a transaction. Let the producer know.
@@ -590,7 +590,7 @@
     (let [tx-id    (rc/new-transactional-id)
           producer-opts (assoc test :client-id (str "jepsen-" tx-id))
           producer (rc/producer
-                     (if (:txn test)
+                     (if (:txn? test)
                        (assoc test :transactional-id tx-id)
                        test)
                      node)]
@@ -645,7 +645,7 @@
       (let [topics (->> (:value op)
                         (map k->topic)
                         distinct)]
-        (if (:txn test)
+        (if (:txn? test)
           (rc/subscribe! consumer
                          topics
                          (rc/logging-rebalance-listener rebalance-log))
@@ -676,7 +676,7 @@
                     ; commitSync is more intended for non-transactional
                     ; workflows.
                     (when (and (#{:poll :txn} (:f op))
-                               (not (:txn test))
+                               (not (:txn? test))
                                (:subscribe (:sub-via test)))
                       (try (.commitSync consumer)
                            ; If we crash during commitSync *outside* a
