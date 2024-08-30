@@ -438,6 +438,14 @@
           (catch DisconnectException e#
            (assoc ~op :type :info, :error [:disconnect (.getMessage e#)]))
 
+          (catch IllegalStateException e#
+            (condp re-find (.getMessage e#)
+              #"Invalid transition attempted"
+              (assoc ~op
+                     ; Could be fail, but we need to close the client
+                     :type :info
+                     :error [:illegal-transition (.getMessage e#)])))
+
          (catch InvalidProducerEpochException e#
            (assoc ~op
                   :type  :fail
