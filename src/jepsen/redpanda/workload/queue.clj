@@ -302,9 +302,9 @@
                ; Broker doesn't support group metadata commit API on version 2,
                ; minimum supported request version is 3 which requires brokers
                ; to be on version 2.5 or above.
-               ;(.groupMetadata consumer)
+               (.groupMetadata consumer))))))
                ; Instead we send the consumer group--this is the old API
-               rc/consumer-group)))))
+               ;rc/consumer-group)))))
 
 (defn safe-abort!
   "Transactional aborts in the Kafka client can themselves fail, which requires
@@ -680,9 +680,7 @@
                     ; you're not supposed to use the offset system?
                     ;
                     ; Also note that per
-                    ; https://stackoverflow.com/questions/45195010/meaning-of-sendoffsetstotransaction-in-kafka-0-11,
-                    ; commitSync is more intended for non-transactional
-                    ; workflows.
+                    ; https://kafka.apache.org/30/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html#sendOffsetsToTransaction(java.util.Map,org.apache.kafka.clients.consumer.ConsumerGroupMetadata), we shouldn't use commit manually; instead we let sendOffsetsToTransaction handle the commit.
                     (when (and (#{:poll :txn} (:f op))
                                (not (:txn? test))
                                (:subscribe (:sub-via test)))

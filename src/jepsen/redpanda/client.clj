@@ -99,7 +99,11 @@
      ; ConsumerConfig/DEFAULT_ISOLATION_LEVEL
      ; ???
      }
-    (:subscribe (:sub-via opts))
+    ;  We used to do this only with subscribe, but the new
+    ;  sendOffsetsToTransaction API will throw if there's no group ID set--even
+    ;  if you're only using consumers with assign. I dunno, mysteries.
+    ; (:subscribe (:sub-via opts))
+    true
     (assoc ConsumerConfig/GROUP_ID_CONFIG consumer-group)
 
     (not= nil (:isolation-level opts))
