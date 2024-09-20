@@ -113,7 +113,11 @@
     (assoc ConsumerConfig/AUTO_OFFSET_RESET_CONFIG (:auto-offset-reset opts))
 
     (not= nil (:enable-auto-commit opts))
-    (assoc ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG (:enable-auto-commit opts))))
+    (assoc ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG (:enable-auto-commit opts))
+
+    (not= nil (:max-poll-records opts))
+    (assoc ConsumerConfig/MAX_POLL_RECORDS_CONFIG (:max-poll-records opts))))
+
 
 (defn producer-config
   "Constructs a config map for talking to a given node."

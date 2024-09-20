@@ -175,6 +175,10 @@
                                            UnknownServerException
                                            )))
 
+(def default-abort-p
+  "What's the probability that we abort a transaction at any given step?"
+  1/100)
+
 (def partition-count
   "How many partitions per topic?"
   2)
@@ -292,7 +296,7 @@
                producer ^KafkaProducer (:producer client)
                consumer ^KafkaConsumer (:consumer client)]
            (when-not (empty? offsets)
-             (info :send-offsets offsets)
+             ;(info :send-offsets offsets)
              (.sendOffsetsToTransaction
                producer
                kafka-offsets
@@ -323,6 +327,7 @@
      :definite?     If true, the transaction *should* not have taken place. If
                     false, the transaction may have taken place.}"
   [client tried-commit?, body-error]
+  ;(warn body-error "Crashed in txn body")
   (try (rc/abort-txn! (:producer client))
        ; The example we're following for transactional workloads resets the
        ; committed offsets for the consumer on abort. It might *seem* like we
@@ -423,6 +428,13 @@
                 (catch RuntimeException e#
                   (safe-abort! ~client true e#)))
            op'#)))))
+
+(defn serializable-exception
+  "Makes an exception safe for representation in our data structures."
+  [e]
+  (if (instance? clojure.lang.ExceptionInfo e)
+    (ex-data e)
+    (str e)))
 
 (defmacro with-errors
   "Takes an operation and a body. Evaluates body, catching common exceptions
@@ -526,8 +538,11 @@
                                   ; We'd like string representations rather
                                   ; than full objects here, so we can serialize
                                   ; the history.
-                                  true              (update :body-error str)
-                                  (:abort-error e#) (update :abort-error str))))
+                                  true
+                                  (update :body-error serializable-exception)
+
+                                  (:abort-error e#)
+                                  (update :abort-error serializable-exception))))
 
          (catch [:type :partitions-assigned] e#
            (assoc ~op :type :fail, :error e#))
@@ -580,6 +595,15 @@
          ~op    (assoc ~op :value value#)
          op'#   (do ~@body)]
      (assoc op'# :value @value#)))
+
+(defn maybe-abort
+  "Kafka transaction recovery is... weird. We intentionally stress it by
+  throwing exceptions inside transactions, with probability (:abort-p test), at
+  each step of transaction execution."
+  [test]
+  (when (and (:txn? test)
+             (< (rand) (:abort-p test default-abort-p)))
+    (throw+ {:type :intentional-abort})))
 
 (defrecord Client [; What node are we bound to?
                    node
@@ -670,11 +694,14 @@
                 (do ; Evaluate micro-ops for side effects, incrementally
                     ; transforming the transaction's micro-ops
                     (reduce (fn [i mop]
+                              (maybe-abort test)
                               (let [mop' (mop! this (:poll-ms op poll-ms) mop)]
                                 (swap! (:value op) assoc i mop'))
                               (inc i))
                             0
                             @(:value op))
+                    ; Final chance to abort before committing
+                    (maybe-abort test)
                     ; If we read, AND we're using :subscribe instead of assign,
                     ; commit offsets. My understanding is that with assign
                     ; you're not supposed to use the offset system?

@@ -13,7 +13,8 @@
             [jepsen.redpanda [nemesis :as nemesis]]
             [jepsen.redpanda.db [kafka :as db.kafka]
                                 [redpanda :as db.redpanda]]
-            [jepsen.redpanda.workload [list-append :as list-append]
+            [jepsen.redpanda.workload [abort :as abort]
+                                      [list-append :as list-append]
                                       [queue :as queue]]
             [slingshot.slingshot :refer [try+ throw+]])
   (:import (org.apache.http.impl.client InternalHttpClient)))
@@ -21,7 +22,8 @@
 (def workloads
   "A map of workload names to workload constructor functions."
   {:list-append list-append/workload
-   :queue       queue/workload})
+   :queue       queue/workload
+   :abort       abort/workload})
 
 (def nemeses
   "The types of faults our nemesis can produce"
@@ -81,6 +83,7 @@
    "org.apache.kafka.clients.admin.internals.AdminMetadataManager"   :warn
    "org.apache.kafka.clients.consumer.ConsumerConfig"                :warn
    "org.apache.kafka.clients.consumer.internals.ConsumerCoordinator" :warn
+   "org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker" :warn
    ; This is also going to kvetch about unknown topic/partitions when listing
    ; offsets
    "org.apache.kafka.clients.consumer.internals.Fetcher"             :error
@@ -95,6 +98,7 @@
    "org.apache.kafka.clients.producer.internals.Sender"              :off
    "org.apache.kafka.clients.producer.internals.TransactionManager"  :warn
    "org.apache.kafka.common.metrics.Metrics"                         :warn
+   "org.apache.kafka.common.telemetry.internals.KafkaMetricsCollector" :warn
    "org.apache.kafka.common.utils.AppInfoParser"                     :warn
    })
 
@@ -254,7 +258,12 @@
 
 (def cli-opts
   "Command line options."
-  [[nil "--acks ACKS" "What level of acknowledgement should our producers use? Default is unset (uses client default); try 1 or 'all'."
+  [[nil "--abort-p PROBABILITY" "Probability of aborting a transaction at any given step."
+    :default 0.1
+    :parse-fn read-string
+    :validate [#(<= 0 % 1) "must be between 0 and 1, inclusive"]]
+
+   [nil "--acks ACKS" "What level of acknowledgement should our producers use? Default is unset (uses client default); try 1 or 'all'."
     :default nil]
 
    [nil "--auto-offset-reset BEHAVIOR" "How should consumers handle it when there's no initial offset in Kafka?"
@@ -400,6 +409,8 @@
           workload  workloads
           nemesis   nemeses
           txn       (case workload
+                      ; Only txn support
+                      :abort [true]
                       ; No txn support
                       :list-append [false]
                       ; Prefer CLI opts, or both true and false.
