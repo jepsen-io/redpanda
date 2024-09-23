@@ -1,6 +1,7 @@
 (ns jepsen.redpanda.client
   "Wrapper for the Java Kafka client."
-  (:require [clojure.tools.logging :refer [info warn]]
+  (:require [clojure.core.protocols :refer [Datafiable datafy]]
+            [clojure.tools.logging :refer [info warn]]
             [dom-top.core :as dt]
             [jepsen.util :as util :refer [await-fn
                                           map-vals
@@ -56,6 +57,12 @@
 (def consumer-group
   "Right now all consumers are a single consumer group."
   "jepsen-group")
+
+(extend-protocol Datafiable
+  TopicPartition
+  (datafy [x]
+    {:topic     (.topic x)
+     :partition (.partition x)}))
 
 (defn consumer-config
   "Constructs a properties map for talking to a given Kafka node."
@@ -361,15 +368,15 @@
   (reify ConsumerRebalanceListener
     (onPartitionsRevoked [_ topic-partitions]
       (throw+ {:type       :partitions-revoked
-               :partitions topic-partitions}))
+               :partitions (mapv datafy topic-partitions)}))
 
     (onPartitionsAssigned [_ topic-partitions]
       (throw+ {:type       :partitions-assigned
-               :partitions topic-partitions}))
+               :partitions (mapv datafy topic-partitions)}))
 
     (onPartitionsLost [_ topic-partitions]
       (throw+ {:type       :partitions-lost
-               :partitions topic-partitions}))))
+               :partitions (mapv datafy topic-partitions)}))))
 
 (defn logging-rebalance-listener
   "A rebalance listener which journals each event to an atom containing a
@@ -378,12 +385,12 @@
   (reify ConsumerRebalanceListener
     (onPartitionsRevoked [_ topic-partitions]
       (swap! log-atom conj {:type :revoked
-                            :partitions topic-partitions}))
+                            :partitions (mapv datafy topic-partitions)}))
 
     (onPartitionsAssigned [_ topic-partitions]
       (swap! log-atom conj {:type       :assigned
-                            :partitions topic-partitions}))
+                            :partitions (mapv datafy topic-partitions)}))
 
     (onPartitionsLost [_ topic-partitions]
       (swap! log-atom conj {:type       :lost
-                            :partitions topic-partitions}))))
+                            :partitions (mapv datafy topic-partitions)}))))

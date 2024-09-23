@@ -164,6 +164,39 @@
         (when (.hasOffset res)
           (.offset res))))))
 
+(defn drain-rebalance-log!
+  "Takes a rebalance log atom, and an atom to drain it to. Swaps the rebalance
+  log with an empty vector, storing its contents in the drain atom."
+  [from to]
+  (swap! from (fn swap [log]
+                (reset! to log)
+                [])))
+
+(defmacro with-rebalance-log
+  "Ugh, everything needs state tracking. I'm so sorry, this is an enormous
+  spaghetti pile.
+
+  Basically, we want to know whether rebalances happened during a given
+  transaction, because we suspect that they might be implicated in certain
+  Weird Polling Events. We take a client and a body. We drain the rebalance
+  log, evaluate the body, then drain the log again. We store these in
+  (:rebalance-log op) under two sub-keys:
+
+      {:before [...]
+       :during [...]}"
+  [client & body]
+  `(let [before# (atom [])
+         during# (atom [])
+         log#    (:rebalance-log ~client)]
+     (drain-rebalance-log! log# before#)
+     (let [op'# ~@body]
+       (drain-rebalance-log! log# during#)
+       (if (or (seq @before#) (seq @during#))
+         (assoc op'# :rebalance-log
+                {:before @before#
+                 :during @during#})
+         op'#))))
+
 (defn random-chunks
   "Randomly chunk a seq into small batches."
   [xs]
@@ -230,7 +263,7 @@
                        (rand-int 3)
                        -1)]
         (rq/with-mutable-value op
-          (rq/with-rebalance-log this
+          (with-rebalance-log this
             (rq/with-errors op
               (rq/with-txn {:txn? true} this op
                 (rc/unwrap-errors
@@ -339,6 +372,8 @@
               ; :prev-op            The last completed op by this process
               ; :prev-first-offset  The first offset from prev op
               ; :prev-last-offset   The last offset of the prev op
+              ; :prev-rebalance?    Has a rebalance occurred since (but not
+              ;                     during) the prev op?
               by-process {}
               ; Vector of delta maps
               deltas []]
@@ -350,6 +385,7 @@
                (let [topic        (:topic value)
                      first-offset (first (:offsets value))
                      last-offset  (peek (:offsets value))
+                     rebalance?   (boolean (seq (:rebalance-log op)))
                      state'       {:prev-topic        topic
                                    :prev-op           op
                                    :prev-first-offset first-offset
@@ -359,38 +395,44 @@
                    (if-let [{:keys [prev-topic
                                     prev-op
                                     prev-first-offset
-                                    prev-last-offset]}
+                                    prev-last-offset
+                                    prev-rebalance?]}
                             (get by-process process)]
                      (if (not= prev-topic topic)
                        ; Fresh topic
                        (recur by-process' deltas)
                        ; Same topic, compute deltas
-                       (let [delta
+                       (let [type (cond
+                                    (< prev-last-offset first-offset) :advance
+                                    (= prev-first-offset first-offset) :rewind
+
+                                    (< first-offset prev-first-offset)
+                                    :rewind-further
+
+                                    true :other)
+                             delta
                              {:prev-offsets (:offsets (:value prev-op))
                               :offsets      (:offsets (:value op))
-                              :type (cond
-                                      (< prev-last-offset first-offset) :advance
-                                      (= prev-first-offset first-offset) :rewind
-
-                                      (< first-offset prev-first-offset)
-                                      :rewind-further
-
-                                      true :other)
-                              :ops [prev-op op]}]
+                              :type         type
+                              :rebalance    (if (or rebalance? prev-rebalance?)
+                                              :rebalance
+                                              :none)
+                              :ops          [prev-op op]}]
                          (recur by-process' (conj deltas delta))))
                      ; Fresh process
                      (recur by-process' deltas))
-                 ; Nothing in this poll; skip it
-                 (recur by-process deltas)))
+                 ; Nothing in this poll; no offsets to change, but we might
+                 ; have a rebalance
+                 (recur (update by-process process
+                                update :prev-rebalance? #(or % rebalance?))
+                        deltas)))
              ; Done iterating
-             (let [freqs (frequencies (map :type deltas))]
-               (prn :freqs freqs)
-               {:valid? (< (count freqs) 2)
-                :counts freqs
-                :advance (take 4 (filter (comp #{:advance} :type) deltas))
-                :rewind  (take 4 (filter (comp #{:rewind} :type) deltas))
-                :rewind-further (take 4 (filter (comp #{:rewind-further} :type) deltas))
-                :other  (take 4 (filter (comp #{:other} :type) deltas))})))))
+             (let [groups (group-by (juxt :type :rebalance) deltas)]
+               (merge {:valid?  (every? #{[:rewind true]
+                                          [:rewind false]}
+                                        (keys groups))
+                       :counts  (update-vals groups count)}
+                      (update-vals groups (partial take 4))))))))
 
 (defn workload
   "Constructs a workload (a map with a generator, client, checker, etc) given

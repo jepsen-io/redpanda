@@ -573,7 +573,10 @@
            log# (map (fn [entry#]
                        (-> entry#
                            (dissoc :partitions)
-                           (assoc :keys (map topic-partition->k
+                           (assoc :keys (mapv (fn [tp#]
+                                                (topic-partition->k
+                                                  (:topic tp#)
+                                                  (:partition tp#)))
                                              (:partitions entry#)))))
                      @log#)]
        (if (seq log#)
