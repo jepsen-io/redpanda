@@ -223,47 +223,6 @@
       ; Crash this client, forcing us to open a new client (and consumer etc)
       :crash     (assoc op :type :info)
 
-      ; A send transaction. Just spams a handful of -1s into the log.
-      (let [abort-at (if (:abort? value)
-                       (rand-int 3)
-                       -1)]
-        (rq/with-mutable-value op
-          (rq/with-rebalance-log this
-            (rq/with-errors op
-              (rq/with-txn {:txn? true} this op
-                (rc/unwrap-errors
-                  ; Send a few messages
-                  ;(dotimes [i (rand-int 3)]
-                  ;  (send! producer (:topic value) -1))
-                  ;(when (= abort-at 0)
-                  ;  (throw+ {:type :intentional-abort}))
-                  ; Poll
-                  (let [records (.poll consumer (rc/ms->duration rq/poll-ms))]
-                    (condp = (count (.partitions records))
-                      0 nil
-                      1 (let [tp (first (.partitions records))
-                              topic (.topic tp)
-                              offsets (mapv (fn [^ConsumerRecord record]
-                                              (.offset record))
-                                            (.records records tp))]
-                          ; Note that our value here is mutable; we do this so
-                          ; we can preserve state even when throwing
-                          (swap! (:value op) assoc
-                                 :topic topic
-                                 :offsets offsets))
-                      (throw+ {:type :too-many-partitions
-                               :partitons (.partitions records)}))
-                    ; Possible abort
-                    (when (= abort-at 1)
-                      (throw+ {:type :intentional-abort}))
-                    ; Send a few messages
-                    (dotimes [i (rand-int 4)]
-                      (send! producer (:topic value) -1))
-                    ; Possible abort
-                    (when (= abort-at 2)
-                      (throw+ {:type :intentional-abort}))
-                    (assoc op :type :ok))))))))))
-
       ; A poll transaction
       :poll
       ; We have several places to introduce an abort; pick one at random
