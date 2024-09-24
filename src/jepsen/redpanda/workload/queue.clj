@@ -276,6 +276,45 @@
             ; And record offset and value.
             [f k' [offset v]])))
 
+(defn rollback-consumer!
+  "Takes a consumer and a completed txn op with a mutable value. Rolls back the
+  consumer positions to the first ones read in this op. Returns op."
+  [^KafkaConsumer consumer op]
+  (loopr [offsets {}]
+         [[_ poll]  (->> op :value deref (filter (comp #{:poll} first)))
+          [k pairs] poll]
+         ; Build up first observed offsets for each key
+         (recur (if (contains? offsets k)
+                  offsets
+                  (assoc offsets k (first (first pairs)))))
+         ; Seek
+         (doseq [[k offset] offsets]
+           (try
+             (.seek consumer (k->topic-partition k) offset)
+             (catch IllegalStateException e
+               ; No current assignment; probably rebalanced out from under us.
+               nil))))
+  op)
+
+(defmacro with-consumer-rollback
+  "Takes a client, an op with a mutable :value atom (e.g. from
+  `with-mutable-value`, and a body. Evaluates body to produce a completion op
+  for a poll, send, or txn. If the op has :type :info or :fail, or if it
+  throws, rolls back the client's consumer position so that the next poll will
+  observe the same offsets as contained in the value. Returns completed
+  op."
+  [client op & body]
+  (assert (symbol? op))
+  `(try
+     (let [op'# (do ~@body)]
+       (if (= :ok (:type op'#))
+         op'#
+         (rollback-consumer! (:consumer ~client) op'#)))
+     (catch Throwable t#
+       ; The original op has a mutable value, so we can use that
+       (rollback-consumer! (:consumer ~client) ~op)
+       (throw t#))))
+
 (defn send-offsets!
   "Takes a client and a completed txn operation. Finds the highest polled
   offsets from that op's :value atom, and calls .sendOffsetsToTransaction on
@@ -391,6 +430,7 @@
   ; have to throw them separately; they'll be handled by with-errors. We also
   ; have to repeat them in two separate try/catch clauses, so we write them
   ; down here.
+  (assert (symbol? op))
   (let [definite-non-abortable-catches
         `[(catch ProducerFencedException     e# (throw e#))
           (catch OutOfOrderSequenceException e# (throw e#))
@@ -440,6 +480,7 @@
   "Takes an operation and a body. Evaluates body, catching common exceptions
   and returning appropriate fail/info operations when they occur."
   [op & body]
+  (assert (symbol? op))
   `(try+ ~@body
           (catch AuthorizationException _#
             (assoc ~op
@@ -687,44 +728,48 @@
           (rc/subscribe! consumer topics))
         (assoc op :type :ok))
 
-      ; Apply poll/send transactions
+      ; Apply poll/send transactions.
       (:poll, :send, :txn)
       (with-mutable-value op
-        (with-rebalance-log this
-          (with-errors op
-            (with-txn test this op
-              (rc/unwrap-errors
-                (do ; Evaluate micro-ops for side effects, incrementally
-                    ; transforming the transaction's micro-ops
-                    (reduce (fn [i mop]
-                              (maybe-abort test)
-                              (let [mop' (mop! this (:poll-ms op poll-ms) mop)]
-                                (swap! (:value op) assoc i mop'))
-                              (inc i))
-                            0
-                            @(:value op))
-                    ; Final chance to abort before committing
-                    (maybe-abort test)
-                    ; If we read, AND we're using :subscribe instead of assign,
-                    ; commit offsets. My understanding is that with assign
-                    ; you're not supposed to use the offset system?
-                    ;
-                    ; Also note that per
-                    ; https://kafka.apache.org/30/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html#sendOffsetsToTransaction(java.util.Map,org.apache.kafka.clients.consumer.ConsumerGroupMetadata), we shouldn't use commit manually; instead we let sendOffsetsToTransaction handle the commit.
-                    (when (and (#{:poll :txn} (:f op))
-                               (not (:txn? test))
-                               (:subscribe (:sub-via test)))
-                      (try (.commitSync consumer)
-                           ; If we crash during commitSync *outside* a
-                           ; transaction, it might be that we poll()ed some
-                           ; values in this txn which Kafka will think we
-                           ; consumed. We won't have any record of them if we
-                           ; fail the txn. Instead, we return an :ok txn *with*
-                           ; the reads, but note the lack of commit.
-                           (catch RuntimeException e
-                             (assoc op :type :ok
-                                    :error [:consumer-commit (.getMessage e)]))))
-                    (assoc op :type :ok)))))))))
+        (with-consumer-rollback this op
+          (with-rebalance-log this
+            (with-errors op
+              (with-txn test this op
+                (rc/unwrap-errors
+                  (do ; Evaluate micro-ops for side effects, incrementally
+                      ; transforming the transaction's micro-ops
+                      (reduce (fn [i mop]
+                                (maybe-abort test)
+                                (let [mop' (mop! this
+                                                 (:poll-ms op poll-ms)
+                                                 mop)]
+                                  (swap! (:value op) assoc i mop'))
+                                (inc i))
+                              0
+                              @(:value op))
+                      ; Final chance to abort before committing
+                      (maybe-abort test)
+                      ; If we read, AND we're using :subscribe instead of
+                      ; assign, commit offsets. My understanding is that with
+                      ; assign you're not supposed to use the offset system?
+                      ;
+                      ; Also note that per
+                      ; https://kafka.apache.org/30/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html#sendOffsetsToTransaction(java.util.Map,org.apache.kafka.clients.consumer.ConsumerGroupMetadata), we shouldn't use commit manually; instead we let sendOffsetsToTransaction handle the commit.
+                      (when (and (#{:poll :txn} (:f op))
+                                 (not (:txn? test))
+                                 (:subscribe (:sub-via test)))
+                        (try (.commitSync consumer)
+                             ; If we crash during commitSync *outside* a
+                             ; transaction, it might be that we poll()ed some
+                             ; values in this txn which Kafka will think we
+                             ; consumed. We won't have any record of them if we
+                             ; fail the txn. Instead, we return an :ok txn *with*
+                             ; the reads, but note the lack of commit.
+                             (catch RuntimeException e
+                               (assoc op :type :ok
+                                      :error [:consumer-commit
+                                              (.getMessage e)]))))
+                      (assoc op :type :ok))))))))))
 
   (teardown! [this test])
 
