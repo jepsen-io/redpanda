@@ -177,7 +177,7 @@
 
 (def default-abort-p
   "What's the probability that we abort a transaction at any given step?"
-  1/100)
+  1/32)
 
 (def partition-count
   "How many partitions per topic?"
