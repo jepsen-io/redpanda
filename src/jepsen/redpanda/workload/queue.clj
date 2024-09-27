@@ -556,6 +556,9 @@
                     :error        [:txn-in-error-state (.getMessage e#)]
                     :end-process? true)
 
+             #"Topic or Partition .+? does not exist"
+             (assoc ~op :type :fail, :error [:topic-partition-does-not-exist (.getMessage e#)])
+
              #"Unexpected error in AddOffsetsToTxnResponse"
              (assoc ~op :type :fail, :error [:add-offsets (.getMessage e#)])
 
