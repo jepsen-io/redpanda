@@ -25,7 +25,8 @@
            (org.apache.kafka.common KafkaException
                                     TopicPartition)
            (org.apache.kafka.common.errors InvalidTopicException
-                                           TopicExistsException)))
+                                           TopicExistsException
+                                           WakeupException)))
 
 (def port
   "What port do we connect to?"
@@ -197,10 +198,24 @@
   (.close c))
 
 (defn close-consumer!
-  "Closes a consumer *immediately*. The default close claims it only blocks
-  30s, but I've seen it deadlock for an hour."
+  "Closes a consumer *immediately*."
   [^KafkaConsumer c]
-  (.close c (ms->duration 0)))
+  ; Fun story: even with a 0 second timeout, 3.8.0 will deadlock for over an
+  ; hour in some conditions. Because the consumer isn't thread-safe, and does
+  ; network IO in .close() (lmao if you wanted to reliably release resources),
+  ; we spawn a future specifically to interrupt us.
+  (let [killer (future
+                 (util/with-thread-name "jepsen kafka close killer"
+                   (Thread/sleep 1000)
+                   (.wakeup c)))]
+    (let [r (try
+              (.close c (ms->duration 0))
+              :closed
+              (catch WakeupException _
+                :wakeup))]
+      ; We returned; don't need anyone to kill us
+      (future-cancel killer)
+      r)))
 
 (defn close-producer!
   "Closes a producer *immediately*, without waiting for incomplete requests."
