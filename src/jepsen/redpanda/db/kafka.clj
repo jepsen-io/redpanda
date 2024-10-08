@@ -202,10 +202,10 @@
 
   db/Pause
   (pause! [this test node]
-    )
+    (c/su (cu/grepkill! :stop "kafka")))
 
   (resume! [this test node]
-    )
+    (c/su (cu/grepkill! :cont "kafka")))
 
   db/LogFiles
   (log-files [this test node]
