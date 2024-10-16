@@ -315,6 +315,10 @@
 
    [nil "--[no-]idempotence" "If true, asks producers to enable idempotence. If omitted, uses client defaults."]
 
+   [nil "--intra-txn-delay MS" "About half the time, transactions will include a delay of roughly this many milliseconds between micro-ops. This gives us a better chance of observing race conditions."
+    :default  0
+    :parse-fn parse-long]
+
    [nil "--isolation-level NAME" "What isolation level should we request for consumers? e.g. read_committed"]
 
    [nil "--max-writes-per-key LIMIT" "How many writes do we perform per key at most?"
