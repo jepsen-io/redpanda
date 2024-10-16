@@ -155,7 +155,7 @@
             nil
             (throw+ e))))))
 
-(defrecord DB [node-ids]
+(defrecord DB [node-ids tcpdump]
   db/DB
   (setup! [this test node]
     ; We need a full set of node IDs for this
@@ -164,6 +164,8 @@
 
     (install! test)
     (configure! test node)
+    (when (:tcpdump test)
+      (db/setup! tcpdump test node))
     (start-zk!)
     (jepsen/synchronize test)
 
@@ -173,7 +175,9 @@
     (db/kill! this test node)
     (kill-zk!)
     (c/su
-      (c/exec :rm :-rf dir)))
+      (c/exec :rm :-rf dir))
+    (when (:tcpdump test)
+      (db/teardown! tcpdump test node)))
 
   db/Process
   (start! [this test node]
@@ -209,8 +213,10 @@
 
   db/LogFiles
   (log-files [this test node]
-    {zk-log-file    "zk.log"
-     kafka-log-file "kafka.log"})
+    (merge (when (:tcpdump test)
+             (db/log-files tcpdump test node))
+           {zk-log-file    "zk.log"
+            kafka-log-file "kafka.log"}))
 
   redpanda.db/DB
   (node-id [this test node]
@@ -223,4 +229,5 @@
   "Constructs a Jepsen database object which knows how to set up and teardown a
   Kafka cluster."
   []
-  (map->DB {:node-ids (atom {})}))
+  (map->DB {:node-ids (atom {})
+            :tcpdump (db/tcpdump {:ports [9092 9093]})}))
