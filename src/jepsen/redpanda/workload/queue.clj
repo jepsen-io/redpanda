@@ -735,7 +735,7 @@
       (:poll, :send, :txn)
       (let [sleep (if (< 0.5 (rand))
                     0
-                    (rand-int (:intra-txn-delay test)))]
+                    (rand-int (:intra-txn-delay test 0)))]
         (with-mutable-value op
           (with-consumer-rollback this op
             (with-rebalance-log this
