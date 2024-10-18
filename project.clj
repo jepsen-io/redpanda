@@ -1,4 +1,4 @@
-(defproject io.jepsen/redpanda "0.1.2"
+(defproject io.jepsen/redpanda "0.1.3-SNAPSHOT"
   :description "Tests for the RedPanda distributed queuing system"
   :url "https://github.com/jepsen-io/redpanda"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
