@@ -1,4 +1,4 @@
-(defproject io.jepsen/redpanda "0.1.3-SNAPSHOT"
+(defproject io.jepsen/redpanda "0.1.3"
   :description "Tests for the RedPanda distributed queuing system"
   :url "https://github.com/jepsen-io/redpanda"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
@@ -7,7 +7,7 @@
                  [clj-http "3.13.0"
                   :exclusions [riddley]]
                  [cheshire "5.13.0"]
-                 [jepsen "0.3.6"]
+                 [jepsen "0.3.7"]
                  [org.apache.kafka/kafka-clients "3.8.0"
                   :exclusions [org.slf4j/slf4j-api]]
                  ]
