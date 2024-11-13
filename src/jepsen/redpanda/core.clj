@@ -14,6 +14,7 @@
             [jepsen.redpanda.db [kafka :as db.kafka]
                                 [redpanda :as db.redpanda]]
             [jepsen.redpanda.workload [abort :as abort]
+                                      [auto-commit :as auto-commit]
                                       [list-append :as list-append]
                                       [queue :as queue]]
             [slingshot.slingshot :refer [try+ throw+]])
@@ -21,7 +22,8 @@
 
 (def workloads
   "A map of workload names to workload constructor functions."
-  {:list-append list-append/workload
+  {:auto-commit auto-commit/workload
+   :list-append list-append/workload
    :queue       queue/workload
    :abort       abort/workload})
 
@@ -265,6 +267,10 @@
 
    [nil "--acks ACKS" "What level of acknowledgement should our producers use? Default is unset (uses client default); try 1 or 'all'."
     :default nil]
+
+   [nil "--auto-commit-interval MILLIS" "How long, in milliseconds, to set auto-commit-interval"
+    :default 5
+    :parse-fn parse-long]
 
    [nil "--auto-offset-reset BEHAVIOR" "How should consumers handle it when there's no initial offset in Kafka?"
    :default nil]

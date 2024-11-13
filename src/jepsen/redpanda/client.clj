@@ -124,8 +124,10 @@
     (assoc ConsumerConfig/ENABLE_AUTO_COMMIT_CONFIG (:enable-auto-commit opts))
 
     (not= nil (:max-poll-records opts))
-    (assoc ConsumerConfig/MAX_POLL_RECORDS_CONFIG (:max-poll-records opts))))
+    (assoc ConsumerConfig/MAX_POLL_RECORDS_CONFIG (:max-poll-records opts))
 
+    (not= nil (:auto-commit-interval opts))
+    (assoc ConsumerConfig/AUTO_COMMIT_INTERVAL_MS_CONFIG (:auto-commit-interval opts))))
 
 (defn producer-config
   "Constructs a config map for talking to a given node."
