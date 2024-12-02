@@ -74,9 +74,7 @@
               :--reinstall :install (str "redpanda=" (:version test))))
     ; We're going to manage daemons ourselves
     (c/exec :systemctl :stop :redpanda)
-    (c/exec :systemctl :stop :wasm_engine)
     (c/exec :systemctl :disable :redpanda)
-    (c/exec :systemctl :disable :wasm_engine)
     ))
 
 (defn gen-node-id!

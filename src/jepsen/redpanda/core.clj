@@ -385,7 +385,7 @@
     :id :txn?]
 
    ["-v" "--version STRING" "What version of Redpanda should we install? See apt list --all-versions redpanda for a full list of available versions."
-    :default "21.10.1-1-e7b6714a"]
+    :default "24.2.12-1"]
 
    ["-w" "--workload NAME" "Which workload should we run?"
     :parse-fn keyword
