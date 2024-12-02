@@ -871,7 +871,7 @@ sudo sh -c 'echo 10000000 > /proc/sys/fs/aio-max-nr'
 
 ## License
 
-Copyright © 2021, 2022 Jepsen. LLC
+Copyright © 2021, 2022, 2024 Jepsen. LLC
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
